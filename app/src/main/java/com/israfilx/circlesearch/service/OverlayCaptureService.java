@@ -119,8 +119,13 @@ public class OverlayCaptureService extends Service {
             }
         });
 
+        // TYPE_ACCESSIBILITY_OVERLAY sengaja TIDAK dipakai di sini — window
+        // type itu hanya bisa ditambahkan oleh proses yang terdaftar sebagai
+        // AccessibilityService aktif (kita tidak punya), dan akan gagal
+        // dengan BadTokenException bila dipaksakan. TYPE_APPLICATION_OVERLAY
+        // cukup dengan izin SYSTEM_ALERT_WINDOW biasa yang sudah kita minta.
         int overlayType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_SYSTEM_ALERT;
 
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
@@ -130,6 +135,12 @@ public class OverlayCaptureService extends Service {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
+
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            Log.e(TAG, "Izin 'Tampil di atas aplikasi lain' belum diberikan untuk app ini — overlay tidak bisa ditampilkan");
+            stopSelf();
+            return;
+        }
 
         try {
             windowManager.addView(selectionView, params);
@@ -178,7 +189,7 @@ public class OverlayCaptureService extends Service {
         });
 
         int menuType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_SYSTEM_ALERT;
 
         WindowManager.LayoutParams menuParams = new WindowManager.LayoutParams(
