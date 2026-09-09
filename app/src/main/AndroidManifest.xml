@@ -44,6 +44,28 @@
         </activity>
 
         <!--
+            WAJIB untuk lolos syarat RoleManager android.app.role.ASSISTANT.
+            Tanpa activity ACTION_ASSIST ini, VoiceInteractionService saja
+            tidak cukup — app tidak akan muncul di daftar pilihan Settings
+            "Aplikasi asisten digital", meski service-nya valid.
+            Theme transparan + noHistory karena activity ini tidak pernah
+            benar-benar menampilkan UI (langsung finish() setelah start
+            OverlayCaptureService).
+        -->
+        <activity
+            android:name=".ui.AssistTriggerActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!--
             VoiceInteractionService: ini "pintu masuk" trigger utama.
             Begitu app ini di-set sebagai default assistant (via root settings),
             sistem akan memanggil onLaunchVoiceAssist() / SessionService saat
