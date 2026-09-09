@@ -11,5 +11,4 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.israfilx.circlesearch.service.MyVoiceInteractionSessionService"
     android:recognitionService="com.israfilx.circlesearch.service.MyVoiceInteractionSessionService"
-    android:supportsAssist="false"
-    android:supportsLaunchFromKeyguard="false" />
+    android:supportsAssist="false" />
