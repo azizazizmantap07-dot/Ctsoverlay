@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.israfilx.circlesearch'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.israfilx.circlesearch"
+        minSdk 26
+        targetSdk 34
+        versionCode 4
+        versionName "1.2.0"
+    }
+
+    // Dibaca dari properti -P yang diinjeksikan workflow build-release.yml
+    // (android.injected.signing.*). Jika tidak diisi (mis. build lokal biasa),
+    // signingConfig ini kosong dan AGP fallback ke unsigned/debug seperlunya.
+    signingConfigs {
+        release {
+            def storeFilePath = project.findProperty('android.injected.signing.store.file')
+            if (storeFilePath) {
+                storeFile file(storeFilePath)
+                storePassword project.findProperty('android.injected.signing.store.password')
+                keyAlias project.findProperty('android.injected.signing.key.alias')
+                keyPassword project.findProperty('android.injected.signing.key.password')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    implementation 'androidx.annotation:annotation:1.7.1'
+    implementation 'androidx.core:core:1.12.0'
+    implementation 'com.google.mlkit:text-recognition:16.0.0'
+    implementation 'com.google.mlkit:language-id:17.0.5'
+    implementation 'com.google.mlkit:translate:17.0.2'
+}
