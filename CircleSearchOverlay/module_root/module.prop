@@ -1,0 +1,6 @@
+id=circlesearch_assistant_setup
+name=Circle Search Overlay - Assistant Setup
+version=v1.0.0
+versionCode=1
+author=israfil_x
+description=Mendaftarkan Circle Search Overlay sebagai default Assistant App secara otomatis saat boot, agar trigger gesture assist (swipe sudut bawah / long-press power) memanggil app ini.
