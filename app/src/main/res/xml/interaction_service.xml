@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Deklarasi wajib untuk VoiceInteractionService.
+    sessionService menunjuk ke service yang meng-create session
+    tiap kali gesture assist dipicu oleh sistem.
+    supportsAssist=true membuat app ini eligible menerima context
+    layar (opsional, tidak kita pakai karena capture dilakukan manual
+    via root screencap, bukan lewat AssistStructure).
+-->
+<voice-interaction-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.israfilx.circlesearch.service.MyVoiceInteractionSessionService"
+    android:recognitionService="com.israfilx.circlesearch.service.MyVoiceInteractionSessionService"
+    android:supportsAssist="false" />

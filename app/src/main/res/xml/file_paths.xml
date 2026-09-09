@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Hanya expose subfolder cache khusus untuk share crop, bukan
+         seluruh cache dir, agar minim permukaan akses. -->
+    <cache-path name="circlesearch_shares" path="circlesearch_shares/" />
+</paths>
