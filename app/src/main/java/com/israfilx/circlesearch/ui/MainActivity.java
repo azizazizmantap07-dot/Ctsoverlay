@@ -1,5 +1,7 @@
 package com.israfilx.circlesearch.ui;
 
+import android.animation.ArgbEvaluator;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
@@ -68,103 +70,95 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(Color.parseColor("#FAFAFA"));
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(20);
         root.setPadding(pad, pad, pad, pad);
         scroll.addView(root);
 
-        // ---- Judul ----
-        TextView title = sectionTitle("Circle Search Overlay");
-        title.setTextSize(20);
+        // ---- Judul RGB animasi ----
+        TextView title = new TextView(this);
+        title.setText("Circle To Search by: Aziz_dev");
+        title.setTextSize(22);
         title.setTypeface(null, Typeface.BOLD);
+        title.setGravity(Gravity.CENTER_HORIZONTAL);
+        title.setPadding(0, dp(8), 0, dp(16));
         root.addView(title);
+        startTitleRgbAnimation(title);
 
-        TextView subtitle = bodyText(
-                "Menu pengaturan perizinan dan model bahasa.\n" +
-                "Aplikasi dipicu lewat gesture asisten (swipe sudut bawah / long-press power) " +
-                "setelah diatur sebagai Asisten Digital.");
-        root.addView(subtitle);
+        // ============================================================
+        // PERIZINAN INTI
+        // ============================================================
+        root.addView(sectionHeader("Perizinan inti"));
 
-        // ================================================================
-        // BAGIAN 1: PERIZINAN
-        // ================================================================
-        root.addView(sectionHeader("1. Perizinan yang Diperlukan"));
-
-        root.addView(bodyText(
-                "Overlay wajib. Asisten Digital ATAU Floating Trigger (+ Accessibility) " +
-                "untuk memicu capture. Root opsional. Ketuk tombol untuk pengaturan."));
-
-        // --- Overlay (tampil di atas aplikasi lain) ---
-        root.addView(itemLabel("Tampil di atas aplikasi lain (Overlay)"));
+        root.addView(itemLabel("Tampil di atas aplikasi lain"));
         statusOverlay = statusText();
         root.addView(statusOverlay);
         Button btnOverlay = actionButton("Buka pengaturan Overlay");
         btnOverlay.setOnClickListener(v -> openOverlaySettings());
         root.addView(btnOverlay);
 
-        // --- Asisten Digital ---
-        root.addView(itemLabel("Asisten Digital (Default Assistant)"));
-        statusAssistant = statusText();
-        root.addView(statusAssistant);
-        Button btnAssistant = actionButton("Buka pengaturan Asisten Digital");
-        btnAssistant.setOnClickListener(v -> openAssistantSettings());
-        root.addView(btnAssistant);
-
-        Button btnSetAssistantRoot = actionButton("Set sebagai Asisten (via root)");
-        btnSetAssistantRoot.setOnClickListener(v -> runSetupAssistantRoot());
-        root.addView(btnSetAssistantRoot);
-
-        // --- Root ---
-        root.addView(itemLabel("Akses Root"));
-        statusRoot = statusText();
-        root.addView(statusRoot);
-        Button btnCheckRoot = actionButton("Cek akses root");
-        btnCheckRoot.setOnClickListener(v -> checkRoot());
-        root.addView(btnCheckRoot);
-
-        // --- Floating Trigger (opsional) ---
-        root.addView(itemLabel("Floating Trigger (pil tepi layar)"));
-        statusFloating = statusText();
-        root.addView(statusFloating);
-        Button btnToggleFloating = actionButton("Aktifkan / Nonaktifkan Floating");
-        btnToggleFloating.setOnClickListener(v -> toggleFloatingTrigger());
-        root.addView(btnToggleFloating);
-
-        root.addView(itemLabel("Accessibility (screenshot untuk floating)"));
+        root.addView(itemLabel("Izin Accessibility"));
         statusA11y = statusText();
         root.addView(statusA11y);
         Button btnA11y = actionButton("Buka pengaturan Accessibility");
         btnA11y.setOnClickListener(v -> openAccessibilitySettings());
         root.addView(btnA11y);
 
-        // --- Battery unrestricted ---
-        root.addView(itemLabel("Tanpa batasan baterai (abaikan optimasi)"));
+        root.addView(itemLabel("Tanpa batasan baterai"));
         statusBattery = statusText();
         root.addView(statusBattery);
         Button btnBattery = actionButton("Izinkan tanpa batasan baterai");
         btnBattery.setOnClickListener(v -> requestBatteryUnrestricted());
         root.addView(btnBattery);
 
-        // --- Info tambahan ---
-        root.addView(bodyText(
-                "Catatan:\n" +
-                "• Overlay wajib untuk menampilkan layer seleksi.\n" +
-                "• Asisten Digital: trigger gesture + screenshot sistem (tanpa dialog).\n" +
-                "• Floating Trigger: pil tipis di tepi kiri — swipe kanan jadi tombol, " +
-                "tap untuk memicu. Butuh Accessibility (Android 11+) bila tanpa root/asisten.\n" +
-                "• Root (opsional): screencap silent sebagai fallback."));
+        // ============================================================
+        // NON ROOT — SUPPORT ASSISTEN
+        // ============================================================
+        root.addView(sectionHeader("Non root · support asisten"));
 
-        // ================================================================
-        // BAGIAN 2: MODEL BAHASA
-        // ================================================================
-        root.addView(sectionHeader("2. Model Bahasa (Unduhan Manual)"));
+        root.addView(itemLabel("Asisten Digital (default)"));
+        statusAssistant = statusText();
+        root.addView(statusAssistant);
+        Button btnAssistant = actionButton("Buka pengaturan Asisten Digital");
+        btnAssistant.setOnClickListener(v -> openAssistantSettings());
+        root.addView(btnAssistant);
+
+        // ============================================================
+        // NON ROOT — TIDAK SUPPORT ASSISTEN
+        // ============================================================
+        root.addView(sectionHeader("Non root · tidak support asisten"));
+
+        root.addView(itemLabel("Floating Trigger Button"));
+        statusFloating = statusText();
+        root.addView(statusFloating);
+        Button btnToggleFloating = actionButton("Aktifkan / Nonaktifkan Floating");
+        btnToggleFloating.setOnClickListener(v -> toggleFloatingTrigger());
+        root.addView(btnToggleFloating);
+
+        // ============================================================
+        // ROOT MODE
+        // ============================================================
+        root.addView(sectionHeader("Root mode"));
+
+        root.addView(itemLabel("Set asisten default (via root)"));
+        statusRoot = statusText();
+        root.addView(statusRoot);
+        Button btnCheckRoot = actionButton("Cek akses root");
+        btnCheckRoot.setOnClickListener(v -> checkRoot());
+        root.addView(btnCheckRoot);
+        Button btnSetAssistantRoot = actionButton("Set sebagai Asisten (via root)");
+        btnSetAssistantRoot.setOnClickListener(v -> runSetupAssistantRoot());
+        root.addView(btnSetAssistantRoot);
+
+        // ============================================================
+        // MENU BAHASA
+        // ============================================================
+        root.addView(sectionHeader("Menu bahasa"));
 
         root.addView(bodyText(
-                "Model terjemahan TIDAK diunduh otomatis saat dipakai. " +
-                "Anda harus mengunduh model terlebih dahulu di sini. " +
-                "Setelah diunduh, terjemahan berjalan sepenuhnya offline.\n\n" +
-                "Bahasa target tetap: Indonesia (id)."));
+                "Model terjemahan diunduh manual. Target: Indonesia (id). Offline setelah unduh."));
 
         languageStatusText = statusText();
         root.addView(languageStatusText);
@@ -191,7 +185,7 @@ public class MainActivity extends Activity {
         refreshLangButton.setOnClickListener(v -> refreshLanguageStatus());
         root.addView(refreshLangButton);
 
-        root.addView(itemLabel("Daftar bahasa (ketuk untuk unduh / hapus)"));
+        root.addView(itemLabel("Daftar bahasa (ketuk unduh / hapus)"));
         languageListContainer = new LinearLayout(this);
         languageListContainer.setOrientation(LinearLayout.VERTICAL);
         root.addView(languageListContainer);
@@ -199,7 +193,20 @@ public class MainActivity extends Activity {
         setContentView(scroll);
     }
 
-    @Override
+    /** Judul RGB dinamis: merah → kuning → hijau → merah (loop). */
+    private void startTitleRgbAnimation(TextView title) {
+        int red = Color.rgb(220, 40, 40);
+        int yellow = Color.rgb(230, 180, 20);
+        int green = Color.rgb(40, 170, 70);
+        ValueAnimator anim = ValueAnimator.ofObject(
+                new ArgbEvaluator(), red, yellow, green, red);
+        anim.setDuration(4000);
+        anim.setRepeatCount(ValueAnimator.INFINITE);
+        anim.setRepeatMode(ValueAnimator.RESTART);
+        anim.addUpdateListener(a -> title.setTextColor((int) a.getAnimatedValue()));
+        anim.start();
+    }
+
     protected void onResume() {
         super.onResume();
         refreshPermissionStatus();
@@ -634,35 +641,36 @@ public class MainActivity extends Activity {
     private TextView sectionHeader(String text) {
         TextView tv = new TextView(this);
         tv.setText(text);
-        tv.setTextSize(16);
+        tv.setTextSize(15);
         tv.setTypeface(null, Typeface.BOLD);
-        tv.setPadding(0, dp(20), 0, dp(8));
-        tv.setTextColor(Color.parseColor("#1565C0"));
+        tv.setPadding(0, dp(22), 0, dp(6));
+        tv.setTextColor(Color.parseColor("#212121"));
         return tv;
     }
 
     private TextView itemLabel(String text) {
         TextView tv = new TextView(this);
-        tv.setText(text);
+        tv.setText("•  " + text);
         tv.setTextSize(14);
         tv.setTypeface(null, Typeface.BOLD);
-        tv.setPadding(0, dp(12), 0, dp(2));
+        tv.setPadding(0, dp(10), 0, dp(2));
+        tv.setTextColor(Color.parseColor("#333333"));
         return tv;
     }
 
     private TextView bodyText(String text) {
         TextView tv = new TextView(this);
         tv.setText(text);
-        tv.setTextSize(13);
+        tv.setTextSize(12);
         tv.setPadding(0, dp(2), 0, dp(6));
-        tv.setTextColor(Color.parseColor("#424242"));
+        tv.setTextColor(Color.parseColor("#757575"));
         return tv;
     }
 
     private TextView statusText() {
         TextView tv = new TextView(this);
-        tv.setTextSize(13);
-        tv.setPadding(0, 0, 0, dp(4));
+        tv.setTextSize(12);
+        tv.setPadding(dp(8), 0, 0, dp(2));
         return tv;
     }
 
@@ -670,11 +678,13 @@ public class MainActivity extends Activity {
         Button btn = new Button(this);
         btn.setText(label);
         btn.setAllCaps(false);
+        btn.setTextSize(13);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(2);
-        lp.bottomMargin = dp(4);
+        lp.bottomMargin = dp(6);
         btn.setLayoutParams(lp);
         return btn;
     }
 }
+
