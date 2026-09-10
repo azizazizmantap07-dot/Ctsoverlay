@@ -9,11 +9,12 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * Menu aksi berupa tiga ikon (kaca pembesar = cari visual, ikon
- * translate = OCR & terjemahkan, ikon ✕ = tutup overlay), selalu
- * ditempatkan menempel di bagian PALING BAWAH layar — bukan di tengah
- * atau menempel area seleksi — supaya tidak pernah menghalangi
- * pemandangan/konten yang sedang dilihat user, baik dipakai untuk:
+ * Menu aksi berupa empat ikon (kaca pembesar = cari visual, ikon
+ * translate = OCR & terjemahkan, ikon salin = OCR teks saja tanpa
+ * translate, ikon ✕ = tutup overlay SELURUHNYA), selalu ditempatkan
+ * menempel di bagian PALING BAWAH layar — bukan di tengah atau menempel
+ * area seleksi — supaya tidak pernah menghalangi pemandangan/konten yang
+ * sedang dilihat user, baik dipakai untuk:
  *  - Mode "1 layar": tap salah satu ikon langsung memproses seluruh
  *    screenshot, tanpa perlu menyeleksi dulu.
  *  - Mode lasso: muncul (di posisi bawah yang sama) setelah user selesai
@@ -37,6 +38,8 @@ public class BottomIconMenu extends LinearLayout {
     public interface OnActionListener {
         void onSearchVisual();
         void onTranslate();
+        /** Salin teks (hasil OCR, TANPA translate) dari area saat ini ke clipboard. */
+        void onCopyText();
         void onClose();
     }
 
@@ -47,10 +50,14 @@ public class BottomIconMenu extends LinearLayout {
 
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(Color.parseColor("#DD202124"));
-        bg.setCornerRadius(dp(32));
+        // Radius dibuat sama dengan setengah tinggi pill secara efektif
+        // (dihitung di onSizeChanged-independent constant besar) supaya
+        // ujung menu selalu tampak benar-benar membulat penuh (pill
+        // shape), bukan sekadar "kurang tajam" di sudut.
+        bg.setCornerRadius(dp(40));
         setBackground(bg);
 
-        int padH = (int) dp(18);
+        int padH = (int) dp(16);
         int padV = (int) dp(10);
         setPadding(padH, padV, padH, padV);
         setElevation(dp(8));
@@ -68,6 +75,16 @@ public class BottomIconMenu extends LinearLayout {
             if (listener != null) listener.onTranslate();
         });
         addView(translateIcon);
+
+        addView(spacer());
+
+        // Salin teks (OCR murni, tanpa translate) — berguna saat user
+        // hanya ingin menyalin teks yang ada pada gambar apa adanya.
+        TextView copyTextIcon = makeIconButton("📋");
+        copyTextIcon.setOnClickListener(v -> {
+            if (listener != null) listener.onCopyText();
+        });
+        addView(copyTextIcon);
 
         addView(spacer());
 

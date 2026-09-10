@@ -16,24 +16,26 @@ import java.io.IOException;
 /**
  * Simpan bitmap hasil crop ke cache internal, lalu kirim via
  * Intent.ACTION_SEND untuk pencarian visual (cari gambar mirip/cari info
- * dari gambar) — SENGAJA TIDAK diarahkan ke Google/Google Lens.
+ * dari gambar).
  *
- * Urutan preferensi:
+ * Urutan preferensi (dari yang paling diutamakan ke paling akhir):
  *  1. App Yandex (Yandex Search atau Yandex Browser) bila terpasang —
- *     mesin pencari non-Google dengan reverse image search yang kuat,
- *     tanpa perlu app tambahan di luar yang sudah lazim dipakai.
+ *     mesin pencari non-Google dengan reverse image search yang kuat.
  *  2. App Bing / Microsoft Start bila terpasang — alternatif non-Google
  *     kedua.
- *  3. Chooser (pemilih aplikasi) BAWAAN ANDROID tanpa target spesifik —
- *     ini BUKAN diarahkan ke Google, murni daftar semua app yang bisa
- *     menerima gambar (browser, Yandex/Bing bila belum terdeteksi di
- *     atas, app lain) dan user sendiri yang memilih. Ini fallback paling
- *     netral bila tidak ada app spesifik yang cocok terpasang.
+ *  3. Google Lens / app Google (jika terpasang) — dikembalikan sebagai
+ *     pilihan, TAPI sengaja diberi prioritas PALING BAWAH di antara
+ *     opsi bertarget spesifik, dicoba hanya setelah Yandex dan Bing
+ *     tidak tersedia/tidak terpasang.
+ *  4. Chooser (pemilih aplikasi) BAWAAN ANDROID tanpa target spesifik —
+ *     murni daftar semua app yang bisa menerima gambar, dan user sendiri
+ *     yang memilih. Fallback paling netral bila tidak ada app spesifik
+ *     di atas yang terpasang.
  *
  * Catatan privasi: keputusan app tujuan mana yang akhirnya dipakai tetap
- * di tangan user lewat chooser sistem — util ini hanya membantu
- * mengarahkan ke pilihan non-Google terlebih dulu bila tersedia,
- * bukan memaksa satu layanan tertentu.
+ * di tangan user lewat chooser sistem — util ini hanya menentukan URUTAN
+ * mana yang dicoba lebih dulu bila lebih dari satu app spesifik terpasang
+ * bersamaan, bukan memaksa satu layanan tertentu.
  */
 public final class ImageSearchShareUtil {
 
@@ -49,6 +51,13 @@ public final class ImageSearchShareUtil {
     // Search terintegrasi) dan Microsoft Start.
     private static final String BING_APP_PACKAGE = "com.microsoft.bing";
     private static final String MICROSOFT_START_PACKAGE = "com.microsoft.amp.apps.bingfeed";
+
+    // Package name app Google (rumah dari Google Lens) dan Google Lens
+    // versi standalone (jarang terpasang terpisah, tapi dicoba juga demi
+    // kelengkapan). Sengaja dicoba PALING TERAKHIR di antara opsi
+    // bertarget spesifik, sesuai preferensi non-Google terlebih dulu.
+    private static final String GOOGLE_APP_PACKAGE = "com.google.android.googlequicksearchbox";
+    private static final String GOOGLE_LENS_PACKAGE = "com.google.ar.lens";
 
     private ImageSearchShareUtil() {}
 
@@ -67,9 +76,15 @@ public final class ImageSearchShareUtil {
         if (tryPackage(context, contentUri, BING_APP_PACKAGE)) return true;
         if (tryPackage(context, contentUri, MICROSOFT_START_PACKAGE)) return true;
 
-        // 3. Fallback: chooser umum tanpa target spesifik apapun — bukan
-        //    diarahkan ke Google, user bebas pilih dari semua app yang
-        //    terpasang dan bisa menerima gambar.
+        // 3. Google Lens / app Google — prioritas paling bawah di antara
+        //    opsi bertarget spesifik, dicoba hanya bila Yandex & Bing
+        //    keduanya tidak tersedia.
+        if (tryPackage(context, contentUri, GOOGLE_LENS_PACKAGE)) return true;
+        if (tryPackage(context, contentUri, GOOGLE_APP_PACKAGE)) return true;
+
+        // 4. Fallback: chooser umum tanpa target spesifik apapun — user
+        //    bebas pilih dari semua app yang terpasang dan bisa menerima
+        //    gambar.
         Intent sendIntent = buildSendIntent(contentUri);
         Intent chooser = Intent.createChooser(sendIntent, "Cari gambar dengan...");
         chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);

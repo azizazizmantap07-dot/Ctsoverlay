@@ -80,7 +80,11 @@ public class SelectionOverlayView extends View {
         super(context);
         this.frozenScreenshot = frozenScreenshot;
 
-        dimPaint.setColor(Color.argb(140, 0, 0, 0));
+        // Dim dibuat setransparan mungkin (alpha rendah) — cukup untuk
+        // memberi kesan "layar dibekukan/mode seleksi aktif" tanpa
+        // menggelapkan konten terlalu banyak, supaya user tetap bisa
+        // melihat detail asli layar dengan jelas di balik overlay.
+        dimPaint.setColor(Color.argb(48, 0, 0, 0));
 
         lassoStrokePaint.setStyle(Paint.Style.STROKE);
         lassoStrokePaint.setStrokeWidth(dp(3));

@@ -25,16 +25,20 @@
         Android 11+ membatasi visibilitas package lain (package visibility).
         Deklarasi ini wajib agar getPackageInfo()/resolveActivity() di
         ImageSearchShareUtil bisa mendeteksi & menargetkan app pencarian
-        visual non-Google (Yandex, Bing/Microsoft Start) bila terpasang.
-        Query intent SEND generik di bawah adalah fallback chooser umum —
-        TIDAK diarahkan ke package tertentu, murni supaya sistem bisa
-        menampilkan semua app yang sanggup menerima gambar.
+        visual (Yandex, Bing/Microsoft Start, Google/Google Lens sebagai
+        prioritas terakhir — lihat ImageSearchShareUtil untuk urutan)
+        bila terpasang. Query intent SEND generik di bawah adalah
+        fallback chooser umum — TIDAK diarahkan ke package tertentu,
+        murni supaya sistem bisa menampilkan semua app yang sanggup
+        menerima gambar.
     -->
     <queries>
         <package android:name="ru.yandex.searchplugin" />
         <package android:name="ru.yandex.browser" />
         <package android:name="com.microsoft.bing" />
         <package android:name="com.microsoft.amp.apps.bingfeed" />
+        <package android:name="com.google.android.googlequicksearchbox" />
+        <package android:name="com.google.ar.lens" />
         <intent>
             <action android:name="android.intent.action.SEND" />
             <data android:mimeType="image/png" />

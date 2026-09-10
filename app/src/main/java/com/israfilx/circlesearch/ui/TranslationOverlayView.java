@@ -2,6 +2,8 @@ package com.israfilx.circlesearch.ui;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -9,8 +11,13 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.animation.DecelerateInterpolator;
+import android.widget.Toast;
 
 import com.israfilx.circlesearch.util.OcrTranslateHelper.TranslatedBlock;
 
@@ -20,29 +27,38 @@ import java.util.List;
  * View yang menggambar hasil terjemahan LANGSUNG MENIMPA teks asli di
  * posisinya masing-masing — bukan kartu popup terpisah. Untuk tiap blok
  * teks hasil OCR:
- *  1. Area teks asli ditutup dengan satu warna SOLID (tanpa blur mosaic)
- *     hasil sampling rata-rata piksel di sekitar area itu sendiri lalu
- *     sedikit digelapkan/diterangkan untuk kontras yang konsisten —
- *     supaya area tertutup terlihat rapi dan tidak "berantakan"/abstrak
- *     seperti pendekatan blur mosaic sebelumnya.
+ *  1. Area teks asli ditutup dengan satu warna SOLID hasil sampling
+ *     rata-rata piksel di sekitar area itu sendiri, dengan sudut kotak
+ *     dibuat lebih membulat (lihat CORNER_RADIUS_DP) supaya terasa lebih
+ *     halus/modern, tidak tajam seperti kotak persegi biasa.
  *  2. Teks terjemahan digambar ulang tepat di posisi & ukuran kira-kira
- *     sama dengan teks aslinya (ukuran font disesuaikan otomatis supaya
- *     muat di lebar boundingBox, dengan word-wrap bila perlu).
+ *     sama dengan teks aslinya (ukuran font disesuaikan otomatis).
+ *
+ * Interaksi tambahan:
+ *  - TAP SEKALI pada sebuah blok teks: salin teks blok itu (hasil
+ *    terjemahan) ke clipboard, beri feedback highlight singkat + toast.
+ *  - TAP-TAHAN (long-press) pada sebuah blok: salin teks ASLI (sebelum
+ *    diterjemahkan) blok itu ke clipboard — berguna saat user butuh teks
+ *    sumbernya, bukan hasil terjemahannya.
+ *  - Tombol "Salin Semua" kecil di pojok atas: salin seluruh teks hasil
+ *    terjemahan pada layar ini sekaligus (satu blok per baris).
  *
  * View ini transparan di seluruh area lain (tidak menggambar background
  * screenshot sendiri) — dipasang SEBAGAI LAPISAN TAMBAHAN di atas
- * SelectionOverlayView yang sudah menampilkan screenshot beku, supaya
- * teks non-hasil-OCR (gambar, UI lain) tetap terlihat apa adanya.
+ * SelectionOverlayView yang sudah menampilkan screenshot beku.
  *
- * Penutupan overlay ini TIDAK BOLEH bergantung semata-mata pada tap di
- * area kosong (lihat onTouchEvent) — BottomIconMenu punya tombol ✕
- * eksplisit yang memanggil OverlayCaptureService.closeOverlayAndStop()
- * secara langsung, supaya selalu ada jalan keluar yang pasti berhasil
- * walau tap-di-luar-teks entah kenapa tidak sampai ke view ini.
+ * PENTING — perilaku "back" vs "tutup total": view ini TIDAK PERNAH
+ * memutuskan sendiri untuk menutup seluruh overlay. Baik tap di luar
+ * semua blok teks maupun tombol back sistem hanya memanggil
+ * {@link OnDismissListener#onDismiss()}, yang oleh pemanggil
+ * (OverlayCaptureService) diartikan sebagai "kembali ke menu utama
+ * overlay" (seleksi + BottomIconMenu tetap tampil), BUKAN menutup semua
+ * window. Penutupan total hanya terjadi lewat tombol ✕ eksplisit di
+ * BottomIconMenu setelah kembali ke menu utama itu.
  */
 public class TranslationOverlayView extends View {
 
-    /** Dipanggil saat user tap di luar semua blok teks, untuk menutup overlay. */
+    /** Dipanggil saat user ingin kembali ke menu utama overlay (bukan menutup semuanya). */
     public interface OnDismissListener {
         void onDismiss();
     }
@@ -51,29 +67,35 @@ public class TranslationOverlayView extends View {
     private final List<TranslatedBlock> blocks;
     private OnDismissListener dismissListener;
 
-    // Waktu view ini terpasang ke window (diisi di onAttachedToWindow).
-    // Dipakai untuk mengabaikan MotionEvent yang datang dalam sesaat
-    // setelah overlay ini tampil — mencegah "residu" ACTION_UP dari
-    // tap ikon translate sebelumnya (yang memicu proses OCR async ini)
-    // langsung tertangkap sebagai tap-untuk-menutup begitu overlay
-    // baru saja ditambahkan ke WindowManager, yang membuat overlay
-    // terlihat muncul sekejap lalu hilang sendiri.
     private long attachedAtMs = 0L;
     private static final long DISMISS_GRACE_PERIOD_MS = 350L;
 
-    // Flag supaya dismiss (baik dari tap maupun dari tombol ✕) tidak
-    // dipicu dua kali — mis. animasi keluar sedang berjalan lalu user
-    // tap lagi, atau tombol ✕ ditekan berulang dengan cepat.
     private boolean dismissing = false;
 
     private final Paint coverPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint highlightPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint copyBtnBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint copyBtnTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private static final float PADDING_DP = 4f;
     private static final float MIN_TEXT_SIZE_SP = 9f;
-    private static final float CORNER_RADIUS_DP = 4f;
+    // Sudut kotak penutup diperhalus (sebelumnya 4dp, terasa terlalu
+    // tajam/kaku) — radius lebih besar membuat tepi kotak terasa lembut
+    // tanpa kehilangan keterbacaan batas area.
+    private static final float CORNER_RADIUS_DP = 10f;
     private static final long ENTER_ANIM_MS = 180L;
     private static final long EXIT_ANIM_MS = 140L;
+    private static final long HIGHLIGHT_FLASH_MS = 220L;
+
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final GestureDetector gestureDetector;
+
+    private TranslatedBlock flashingBlock;
+    private float flashAlpha = 0f;
+
+    private RectF copyAllButtonRect;
+    private static final String COPY_ALL_LABEL = "⧉ Salin Semua";
 
     public TranslationOverlayView(Context context, Bitmap sourceBitmap, List<TranslatedBlock> blocks) {
         super(context);
@@ -83,8 +105,31 @@ public class TranslationOverlayView extends View {
         textPaint.setColor(Color.WHITE);
         textPaint.setTextAlign(Paint.Align.LEFT);
 
+        highlightPaint.setStyle(Paint.Style.STROKE);
+        highlightPaint.setStrokeWidth(dp(3));
+        highlightPaint.setColor(Color.parseColor("#80D8FF"));
+
+        copyBtnBgPaint.setStyle(Paint.Style.FILL);
+        copyBtnBgPaint.setColor(Color.parseColor("#DD202124"));
+
+        copyBtnTextPaint.setColor(Color.WHITE);
+        copyBtnTextPaint.setTextSize(spToPx(13f));
+        copyBtnTextPaint.setTextAlign(Paint.Align.CENTER);
+
         setWillNotDraw(false);
         setClickable(true);
+
+        gestureDetector = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onSingleTapConfirmed(MotionEvent e) {
+                return handleTap(e.getX(), e.getY(), false);
+            }
+
+            @Override
+            public void onLongPress(MotionEvent e) {
+                handleTap(e.getX(), e.getY(), true);
+            }
+        });
     }
 
     public void setOnDismissListener(OnDismissListener l) {
@@ -96,9 +141,6 @@ public class TranslationOverlayView extends View {
         super.onAttachedToWindow();
         attachedAtMs = android.os.SystemClock.uptimeMillis();
 
-        // Animasi masuk: fade-in + scale-up ringan dari 96% supaya
-        // kemunculan hasil terjemahan terasa halus, bukan muncul
-        // tiba-tiba (snap) begitu OCR selesai.
         setAlpha(0f);
         setScaleX(0.96f);
         setScaleY(0.96f);
@@ -113,11 +155,9 @@ public class TranslationOverlayView extends View {
 
     /**
      * Tutup overlay ini dengan animasi fade-out singkat, baru panggil
-     * dismissListener setelah animasi selesai (bukan langsung), supaya
-     * transisi terlihat mulus alih-alih view hilang mendadak.
-     *
-     * Aman dipanggil berkali-kali — panggilan kedua dst. diabaikan
-     * selama animasi keluar masih berjalan.
+     * dismissListener setelah animasi selesai. Pemanggil (Service)
+     * menafsirkan callback ini sebagai "kembali ke menu utama", bukan
+     * menutup semua window — lihat dokumentasi kelas di atas.
      */
     public void dismissAnimated() {
         if (dismissing) return;
@@ -146,12 +186,27 @@ public class TranslationOverlayView extends View {
     }
 
     @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        float btnW = dp(120);
+        float btnH = dp(34);
+        float margin = dp(14);
+        copyAllButtonRect = new RectF(w - margin - btnW, margin, w - margin, margin + btnH);
+    }
+
+    @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
 
         for (TranslatedBlock block : blocks) {
             drawBlockOverlay(canvas, block);
         }
+
+        if (flashingBlock != null && flashAlpha > 0f) {
+            drawFlashHighlight(canvas, flashingBlock);
+        }
+
+        drawCopyAllButton(canvas);
     }
 
     private void drawBlockOverlay(Canvas canvas, TranslatedBlock block) {
@@ -165,26 +220,30 @@ public class TranslationOverlayView extends View {
                 box.right + pad,
                 box.bottom + pad);
 
-        // 1. Tutup area teks asli dengan satu warna solid saja — warna
-        //    dasar diambil dari rata-rata piksel sekitar blok itu sendiri
-        //    (supaya tetap menyatu dengan tema/latar sekitarnya, bukan
-        //    kotak abu-abu generik), lalu digelapkan/diterangkan sedikit
-        //    supaya kontras terhadap teks putih/hitam di atasnya selalu
-        //    konsisten. Tidak ada lapisan blur/mosaic lagi — itu yang
-        //    sebelumnya membuat area tertutup terlihat abstrak dan
-        //    berantakan alih-alih rapi.
         int avgColor = sampleAverageColor(box);
         int coverColor = solidCoverColor(avgColor);
         drawCoverBase(canvas, coverRect, coverColor);
 
-        // 2. Gambar teks terjemahan di atas area yang sudah ditutup,
-        //    warna kontras otomatis (putih/hitam) berdasar kecerahan
-        //    warna dasar penutup supaya tetap terbaca.
         textPaint.setColor(readableTextColor(coverColor));
         drawWrappedText(canvas, block.translatedText, coverRect);
     }
 
-    /** Warna rata-rata area sekitar blok, dipakai sebagai basis warna penutup. */
+    private void drawFlashHighlight(Canvas canvas, TranslatedBlock block) {
+        Rect box = block.boundingBox;
+        if (box == null) return;
+        float pad = dp(PADDING_DP + 2f);
+        RectF rect = new RectF(box.left - pad, box.top - pad, box.right + pad, box.bottom + pad);
+        highlightPaint.setAlpha((int) (255 * flashAlpha));
+        canvas.drawRoundRect(rect, dp(CORNER_RADIUS_DP + 2f), dp(CORNER_RADIUS_DP + 2f), highlightPaint);
+    }
+
+    private void drawCopyAllButton(Canvas canvas) {
+        if (copyAllButtonRect == null || blocks.isEmpty()) return;
+        canvas.drawRoundRect(copyAllButtonRect, dp(17), dp(17), copyBtnBgPaint);
+        float textY = copyAllButtonRect.centerY() - (copyBtnTextPaint.ascent() + copyBtnTextPaint.descent()) / 2f;
+        canvas.drawText(COPY_ALL_LABEL, copyAllButtonRect.centerX(), textY, copyBtnTextPaint);
+    }
+
     private int sampleAverageColor(Rect box) {
         int left = Math.max(0, box.left);
         int top = Math.max(0, box.top);
@@ -192,7 +251,6 @@ public class TranslationOverlayView extends View {
         int bottom = Math.min(sourceBitmap.getHeight(), box.bottom);
         if (right <= left || bottom <= top) return Color.DKGRAY;
 
-        // Ambil sample kecil (downscale) supaya cepat, bukan tiap piksel.
         int sampleW = Math.max(1, Math.min(12, right - left));
         int sampleH = Math.max(1, Math.min(12, bottom - top));
         try {
@@ -216,13 +274,6 @@ public class TranslationOverlayView extends View {
         }
     }
 
-    /**
-     * Ubah warna rata-rata sampel jadi warna penutup solid yang cukup
-     * "padat"/pekat sebagai latar teks — digelapkan bila terang, atau
-     * sedikit diterangkan bila sangat gelap, supaya teks kontras yang
-     * digambar di atasnya (hitam/putih) selalu mudah dibaca terlepas
-     * dari warna asli area yang ditutup.
-     */
     private int solidCoverColor(int avgColor) {
         double luminance = (0.299 * Color.red(avgColor)
                 + 0.587 * Color.green(avgColor)
@@ -245,7 +296,6 @@ public class TranslationOverlayView extends View {
         canvas.drawRoundRect(coverRect, dp(CORNER_RADIUS_DP), dp(CORNER_RADIUS_DP), coverPaint);
     }
 
-    /** Pilih warna teks (putih/hitam) yang paling kontras terhadap warna dasar penutup. */
     private int readableTextColor(int backgroundColor) {
         double luminance = (0.299 * Color.red(backgroundColor)
                 + 0.587 * Color.green(backgroundColor)
@@ -253,12 +303,6 @@ public class TranslationOverlayView extends View {
         return luminance > 0.55 ? Color.BLACK : Color.WHITE;
     }
 
-    /**
-     * Gambar teks terjemahan dengan word-wrap otomatis di dalam rect,
-     * ukuran font disusutkan bertahap sampai muat (baik lebar maupun
-     * tinggi), supaya kalimat lebih panjang dari aslinya (umum terjadi
-     * saat translate ke Indonesia) tetap terbaca dalam area yang sama.
-     */
     private void drawWrappedText(Canvas canvas, String text, RectF rect) {
         if (text == null || text.trim().isEmpty()) return;
 
@@ -269,8 +313,6 @@ public class TranslationOverlayView extends View {
         float textSize = Math.max(spToPx(MIN_TEXT_SIZE_SP), rect.height() * 0.62f);
         List<String> lines;
 
-        // Susutkan ukuran font bertahap sampai seluruh baris muat di
-        // tinggi rect, atau sampai mencapai batas minimum keterbacaan.
         while (true) {
             textPaint.setTextSize(textSize);
             lines = wrapText(text, maxWidth);
@@ -312,18 +354,86 @@ public class TranslationOverlayView extends View {
         return lines;
     }
 
+    // ---- Interaksi: tap salin per-blok, long-press salin teks asli, tombol Salin Semua ----
+
+    private boolean handleTap(float x, float y, boolean isLongPress) {
+        if (copyAllButtonRect != null && copyAllButtonRect.contains(x, y)) {
+            copyAllBlocksToClipboard();
+            return true;
+        }
+
+        TranslatedBlock hit = findBlockAt(x, y);
+        if (hit == null) return false;
+
+        String textToCopy = isLongPress ? hit.originalText : hit.translatedText;
+        String label = isLongPress ? "Teks asli disalin" : "Terjemahan disalin";
+        copyToClipboard(textToCopy, label);
+        flashBlock(hit);
+        return true;
+    }
+
+    private TranslatedBlock findBlockAt(float x, float y) {
+        float pad = dp(PADDING_DP);
+        for (TranslatedBlock block : blocks) {
+            Rect box = block.boundingBox;
+            if (box == null) continue;
+            RectF r = new RectF(box.left - pad, box.top - pad, box.right + pad, box.bottom + pad);
+            if (r.contains(x, y)) return block;
+        }
+        return null;
+    }
+
+    private void flashBlock(TranslatedBlock block) {
+        flashingBlock = block;
+        flashAlpha = 1f;
+        invalidate();
+        mainHandler.postDelayed(() -> {
+            flashAlpha = 0f;
+            flashingBlock = null;
+            invalidate();
+        }, HIGHLIGHT_FLASH_MS);
+    }
+
+    private void copyAllBlocksToClipboard() {
+        if (blocks.isEmpty()) return;
+        StringBuilder sb = new StringBuilder();
+        for (TranslatedBlock b : blocks) {
+            if (sb.length() > 0) sb.append("\n");
+            sb.append(b.translatedText);
+        }
+        copyToClipboard(sb.toString(), "Semua terjemahan disalin (" + blocks.size() + " blok)");
+    }
+
+    private void copyToClipboard(String text, String toastLabel) {
+        if (text == null || text.trim().isEmpty()) return;
+        ClipboardManager cm = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null) return;
+        cm.setPrimaryClip(ClipData.newPlainText("Circle Search", text));
+        Toast.makeText(getContext(), toastLabel, Toast.LENGTH_SHORT).show();
+    }
+
     @Override
-    public boolean onTouchEvent(android.view.MotionEvent event) {
-        if (event.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
+    public boolean onTouchEvent(MotionEvent event) {
+        gestureDetector.onTouchEvent(event);
+
+        if (event.getActionMasked() == MotionEvent.ACTION_UP) {
             long sinceAttach = android.os.SystemClock.uptimeMillis() - attachedAtMs;
             if (sinceAttach < DISMISS_GRACE_PERIOD_MS) {
-                // Kemungkinan besar ini residu dari jari yang masih
-                // menyentuh layar sesaat setelah tap ikon translate
-                // (yang baru selesai diproses secara async) — abaikan,
-                // jangan langsung menutup overlay yang baru saja tampil.
+                // Kemungkinan besar residu jari dari tap ikon translate
+                // sebelumnya — abaikan supaya overlay yang baru saja
+                // tampil tidak langsung "kembali" begitu OCR selesai.
                 return true;
             }
-            dismissAnimated();
+            // Tap yang TIDAK kena blok teks maupun tombol Salin Semua
+            // dianggap "tap di area kosong" -> kembali ke menu utama
+            // (BUKAN menutup semua overlay).
+            float x = event.getX();
+            float y = event.getY();
+            boolean onCopyAllButton = copyAllButtonRect != null && copyAllButtonRect.contains(x, y);
+            boolean onBlock = findBlockAt(x, y) != null;
+            if (!onCopyAllButton && !onBlock) {
+                dismissAnimated();
+            }
         }
         return true;
     }
