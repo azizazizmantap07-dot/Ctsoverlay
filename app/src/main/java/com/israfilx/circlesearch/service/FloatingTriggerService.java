@@ -2,6 +2,7 @@ package com.israfilx.circlesearch.service;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
+import android.animation.ArgbEvaluator;
 import android.animation.ValueAnimator;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -33,15 +34,11 @@ import android.widget.Toast;
 import androidx.annotation.Nullable;
 
 /**
- * Floating trigger opsional: pil tipis semi-transparan di tepi kiri layar.
+ * Floating trigger: pil visual 9×56 dp di tepi kiri, area sentuh lebih besar
+ * agar klik/swipe responsif tanpa mengubah ukuran visual.
  *
- * Interaksi:
- *  - Drag vertikal → pindah posisi Y, menempel ke tepi kiri
- *  - Swipe ke kanan → animasi mengembang jadi tombol bulat
- *  - Tap tombol bulat → trigger overlay, sembunyikan floating
- *  - Swipe ke kiri pada tombol bulat → animasi kembali jadi pil
- *  - Idle 5 detik saat expanded → auto-collapse ke pil
- *  - Saat overlay ditutup → pil muncul lagi di posisi Y terakhir
+ * Warna siklus setiap 10 detik: merah → kuning → hijau → merah …
+ * (berlaku untuk bentuk pil maupun tombol bulat).
  */
 public class FloatingTriggerService extends Service {
 
@@ -58,6 +55,23 @@ public class FloatingTriggerService extends Service {
     private static final int NOTIF_ID = 1002;
     private static final long AUTO_COLLAPSE_MS = 5000L;
     private static final long ANIM_MS = 220L;
+    private static final long COLOR_CYCLE_MS = 10_000L;
+
+    /** Ukuran visual pil. */
+    private static final int VISUAL_PILL_W_DP = 9;
+    private static final int VISUAL_PILL_H_DP = 56;
+    /** Area sentuh lebih lebar dari visual (hanya hit-box). */
+    private static final int TOUCH_PILL_W_DP = 40;
+    private static final int TOUCH_PILL_H_DP = 56;
+    private static final int VISUAL_BTN_DP = 40;
+    private static final int TOUCH_BTN_DP = 52;
+
+    // Merah / kuning / hijau semi-transparan
+    private static final int[] CYCLE_COLORS = {
+            Color.argb(160, 220, 40, 40),
+            Color.argb(160, 230, 190, 20),
+            Color.argb(160, 40, 170, 70)
+    };
 
     private WindowManager windowManager;
     private PillView pillView;
@@ -65,6 +79,7 @@ public class FloatingTriggerService extends Service {
     private boolean expanded = false;
     private boolean animating = false;
     private int savedY = 200;
+    private int colorIndex = 0;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable autoCollapseRunnable = () -> {
@@ -73,6 +88,37 @@ public class FloatingTriggerService extends Service {
             animateCollapse();
         }
     };
+    private ValueAnimator colorAnim;
+
+    private final Runnable colorCycleRunnable = new Runnable() {
+        @Override
+        public void run() {
+            animateToNextColor();
+            mainHandler.postDelayed(this, COLOR_CYCLE_MS);
+        }
+    };
+
+    /** Transisi warna smooth (merah ↔ kuning ↔ hijau). */
+    private void animateToNextColor() {
+        if (pillView == null) return;
+        int from = CYCLE_COLORS[colorIndex];
+        int nextIndex = (colorIndex + 1) % CYCLE_COLORS.length;
+        int to = CYCLE_COLORS[nextIndex];
+        colorIndex = nextIndex;
+
+        if (colorAnim != null) {
+            colorAnim.cancel();
+        }
+        colorAnim = ValueAnimator.ofObject(new ArgbEvaluator(), from, to);
+        colorAnim.setDuration(700);
+        colorAnim.addUpdateListener(a -> {
+            if (pillView != null) {
+                pillView.setFillColor((int) a.getAnimatedValue());
+                pillView.invalidate();
+            }
+        });
+        colorAnim.start();
+    }
 
     private final BroadcastReceiver overlayClosedReceiver = new BroadcastReceiver() {
         @Override
@@ -113,6 +159,7 @@ public class FloatingTriggerService extends Service {
         String action = intent != null ? intent.getAction() : null;
         if (ACTION_HIDE.equals(action)) {
             cancelAutoCollapse();
+            stopColorCycle();
             hidePill();
         } else {
             showPill();
@@ -145,16 +192,20 @@ public class FloatingTriggerService extends Service {
 
         expanded = false;
         animating = false;
+        colorIndex = 0;
         pillView = new PillView(this);
-        int pillW = dp(9);
-        int pillH = dp(28);
+        pillView.setFillColor(CYCLE_COLORS[0]);
+
+        // Window = area sentuh (lebih besar); visual digambar lebih kecil di dalam
+        int touchW = dp(TOUCH_PILL_W_DP);
+        int touchH = dp(TOUCH_PILL_H_DP);
 
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_SYSTEM_ALERT;
 
         params = new WindowManager.LayoutParams(
-                pillW, pillH, type,
+                touchW, touchH, type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
@@ -165,6 +216,7 @@ public class FloatingTriggerService extends Service {
 
         try {
             windowManager.addView(pillView, params);
+            startColorCycle();
             Log.d(TAG, "Pil ditampilkan di y=" + params.y);
         } catch (Exception e) {
             Log.e(TAG, "Gagal menampilkan pil", e);
@@ -174,6 +226,7 @@ public class FloatingTriggerService extends Service {
 
     private void hidePill() {
         cancelAutoCollapse();
+        stopColorCycle();
         if (pillView != null) {
             try {
                 windowManager.removeView(pillView);
@@ -185,6 +238,19 @@ public class FloatingTriggerService extends Service {
         animating = false;
     }
 
+    private void startColorCycle() {
+        stopColorCycle();
+        mainHandler.postDelayed(colorCycleRunnable, COLOR_CYCLE_MS);
+    }
+
+    private void stopColorCycle() {
+        mainHandler.removeCallbacks(colorCycleRunnable);
+        if (colorAnim != null) {
+            colorAnim.cancel();
+            colorAnim = null;
+        }
+    }
+
     private void scheduleAutoCollapse() {
         cancelAutoCollapse();
         mainHandler.postDelayed(autoCollapseRunnable, AUTO_COLLAPSE_MS);
@@ -194,7 +260,6 @@ public class FloatingTriggerService extends Service {
         mainHandler.removeCallbacks(autoCollapseRunnable);
     }
 
-    /** Animasi pil → tombol bulat. */
     private void animateExpand() {
         if (pillView == null || params == null || expanded || animating) return;
         animating = true;
@@ -202,10 +267,10 @@ public class FloatingTriggerService extends Service {
 
         final int startW = params.width;
         final int startH = params.height;
-        final int endW = dp(40);
-        final int endH = dp(40);
+        final int endW = dp(TOUCH_BTN_DP);
+        final int endH = dp(TOUCH_BTN_DP);
         final int startX = params.x;
-        final int endX = dp(8);
+        final int endX = dp(4);
 
         ValueAnimator anim = ValueAnimator.ofFloat(0f, 1f);
         anim.setDuration(ANIM_MS);
@@ -236,7 +301,6 @@ public class FloatingTriggerService extends Service {
         anim.start();
     }
 
-    /** Animasi tombol bulat → pil. */
     private void animateCollapse() {
         if (pillView == null || params == null || !expanded || animating) return;
         animating = true;
@@ -244,8 +308,8 @@ public class FloatingTriggerService extends Service {
 
         final int startW = params.width;
         final int startH = params.height;
-        final int endW = dp(9);
-        final int endH = dp(28);
+        final int endW = dp(TOUCH_PILL_W_DP);
+        final int endH = dp(TOUCH_PILL_H_DP);
         final int startX = params.x;
         final int endX = 0;
 
@@ -261,7 +325,6 @@ public class FloatingTriggerService extends Service {
                 windowManager.updateViewLayout(pillView, params);
             } catch (Exception ignored) {
             }
-            // progress 1→0 saat collapse
             pillView.setProgress(1f - t);
             pillView.invalidate();
         });
@@ -319,6 +382,7 @@ public class FloatingTriggerService extends Service {
     @Override
     public void onDestroy() {
         cancelAutoCollapse();
+        stopColorCycle();
         try {
             unregisterReceiver(overlayClosedReceiver);
         } catch (Exception ignored) {
@@ -333,12 +397,14 @@ public class FloatingTriggerService extends Service {
         return null;
     }
 
-    /** View kustom: morph antara pil tipis dan tombol bulat. */
+    /**
+     * View: window = hit-box besar; visual pil 9×56 digambar di tepi kiri.
+     * Saat expanded, visual tombol bulat di tengah hit-box.
+     */
     private class PillView extends View {
         private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private boolean isExpanded = false;
-        /** 0 = pil, 1 = bulat penuh. */
         private float progress = 0f;
         private float downX, downY;
         private int startParamX, startParamY;
@@ -347,9 +413,13 @@ public class FloatingTriggerService extends Service {
         PillView(Context ctx) {
             super(ctx);
             fillPaint.setStyle(Paint.Style.FILL);
-            fillPaint.setColor(Color.argb(150, 0, 0, 0));
+            fillPaint.setColor(CYCLE_COLORS[0]);
             dotPaint.setColor(Color.WHITE);
             dotPaint.setStyle(Paint.Style.FILL);
+        }
+
+        void setFillColor(int color) {
+            fillPaint.setColor(color);
         }
 
         void setExpanded(boolean e) {
@@ -366,17 +436,26 @@ public class FloatingTriggerService extends Service {
             float h = getHeight();
             if (w <= 0 || h <= 0) return;
 
-            // Interpolasi bentuk: sudut membulat → lingkaran penuh
-            float corner = (h / 2f) * (1f - progress * 0.15f) + (Math.min(w, h) / 2f) * progress;
-            RectF rect = new RectF(0, 0, w, h);
+            float visPillW = dp(VISUAL_PILL_W_DP);
+            float visPillH = dp(VISUAL_PILL_H_DP);
+            float visBtn = dp(VISUAL_BTN_DP);
+
+            // Interpolasi: visual dari pil di kiri → lingkaran di tengah
+            float curW = visPillW + (visBtn - visPillW) * progress;
+            float curH = visPillH + (visBtn - visPillH) * progress;
+            // Saat progress 0, tempel kiri; saat 1, center di window
+            float left = (w - curW) * progress * 0.5f;
+            float top = (h - curH) * 0.5f;
+
+            float corner = (Math.min(curW, curH) / 2f);
+            RectF rect = new RectF(left, top, left + curW, top + curH);
             canvas.drawRoundRect(rect, corner, corner, fillPaint);
 
-            // Titik putih muncul saat mendekati bentuk bulat
             if (progress > 0.3f) {
                 float alpha = (progress - 0.3f) / 0.7f;
                 dotPaint.setAlpha((int) (255 * alpha));
-                float r = Math.min(w, h) * 0.12f * progress;
-                canvas.drawCircle(w / 2f, h / 2f, r, dotPaint);
+                float r = Math.min(curW, curH) * 0.12f * progress;
+                canvas.drawCircle(left + curW / 2f, top + curH / 2f, r, dotPaint);
             }
         }
 
@@ -391,7 +470,6 @@ public class FloatingTriggerService extends Service {
                     startParamX = params.x;
                     startParamY = params.y;
                     moved = false;
-                    // Sentuhan pada tombol bulat → reset timer auto-collapse
                     if (isExpanded) {
                         cancelAutoCollapse();
                     }
@@ -405,12 +483,10 @@ public class FloatingTriggerService extends Service {
                     }
 
                     if (!isExpanded) {
-                        // Swipe kanan → expand
                         if (dx > dp(36) && Math.abs(dx) > Math.abs(dy) * 1.2f) {
                             animateExpand();
                             return true;
                         }
-                        // Drag vertikal, tetap di tepi kiri
                         params.x = 0;
                         params.y = Math.max(0, startParamY + (int) dy);
                         try {
@@ -418,12 +494,10 @@ public class FloatingTriggerService extends Service {
                         } catch (Exception ignored) {
                         }
                     } else {
-                        // Swipe kiri → collapse seketika (dengan animasi)
                         if (dx < -dp(36) && Math.abs(dx) > Math.abs(dy) * 1.2f) {
                             animateCollapse();
                             return true;
                         }
-                        // Geser bebas tombol bulat
                         params.x = Math.max(0, startParamX + (int) dx);
                         params.y = Math.max(0, startParamY + (int) dy);
                         try {
@@ -441,7 +515,6 @@ public class FloatingTriggerService extends Service {
                                 && Math.abs(event.getRawY() - downY) < 12)) {
                             triggerCapture();
                         } else {
-                            // Setelah drag, tetap expanded; restart timer 5 dtk
                             savePosition();
                             scheduleAutoCollapse();
                         }
@@ -452,8 +525,6 @@ public class FloatingTriggerService extends Service {
                         } catch (Exception ignored) {
                         }
                         savePosition();
-                        // Klik (tanpa drag) → expand jadi tombol bulat
-                        // (alternatif swipe kanan, agar tidak bentrok gesture back)
                         if (!moved || (Math.abs(event.getRawX() - downX) < 12
                                 && Math.abs(event.getRawY() - downY) < 12)) {
                             animateExpand();

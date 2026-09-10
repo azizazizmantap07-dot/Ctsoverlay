@@ -8,6 +8,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
+import android.os.PowerManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -52,6 +53,7 @@ public class MainActivity extends Activity {
     private TextView statusRoot;
     private TextView statusFloating;
     private TextView statusA11y;
+    private TextView statusBattery;
     private TextView languageStatusText;
     private LinearLayout languageListContainer;
     private ProgressBar downloadProgress;
@@ -135,6 +137,14 @@ public class MainActivity extends Activity {
         Button btnA11y = actionButton("Buka pengaturan Accessibility");
         btnA11y.setOnClickListener(v -> openAccessibilitySettings());
         root.addView(btnA11y);
+
+        // --- Battery unrestricted ---
+        root.addView(itemLabel("Tanpa batasan baterai (abaikan optimasi)"));
+        statusBattery = statusText();
+        root.addView(statusBattery);
+        Button btnBattery = actionButton("Izinkan tanpa batasan baterai");
+        btnBattery.setOnClickListener(v -> requestBatteryUnrestricted());
+        root.addView(btnBattery);
 
         // --- Info tambahan ---
         root.addView(bodyText(
@@ -259,6 +269,47 @@ public class MainActivity extends Activity {
                     : "✗ Accessibility belum aktif — wajib untuk floating tanpa root");
             statusA11y.setTextColor(a11y
                     ? Color.parseColor("#2E7D32") : Color.parseColor("#C62828"));
+        }
+
+        // Battery
+        if (statusBattery != null) {
+            boolean unrestricted = isBatteryUnrestricted();
+            statusBattery.setText(unrestricted
+                    ? "✓ Tanpa batasan baterai (tidak dioptimasi sistem)"
+                    : "✗ Masih dioptimasi — service bisa di-kill sistem");
+            statusBattery.setTextColor(unrestricted
+                    ? Color.parseColor("#2E7D32") : Color.parseColor("#C62828"));
+        }
+    }
+
+    private boolean isBatteryUnrestricted() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    private void requestBatteryUnrestricted() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            Toast.makeText(this, "Tidak diperlukan di versi Android ini", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (isBatteryUnrestricted()) {
+            Toast.makeText(this, "Sudah tanpa batasan baterai", Toast.LENGTH_SHORT).show();
+            refreshPermissionStatus();
+            return;
+        }
+        try {
+            Intent intent = new Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (Exception e2) {
+                Toast.makeText(this, "Buka Settings → Baterai → Optimasi baterai manual",
+                        Toast.LENGTH_LONG).show();
+            }
         }
     }
 
