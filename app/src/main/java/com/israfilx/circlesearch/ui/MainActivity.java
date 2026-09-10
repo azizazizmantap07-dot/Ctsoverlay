@@ -119,12 +119,12 @@ public class MainActivity extends Activity {
 
         // --- Info tambahan ---
         root.addView(bodyText(
-                "Catatan (mode dual root / non-root):\n" +
+                "Catatan (prioritas capture):\n" +
                 "• Overlay wajib agar layer seleksi & terjemahan tampil di atas aplikasi lain.\n" +
-                "• Asisten Digital wajib agar gesture assist sistem memanggil aplikasi ini.\n" +
-                "• Root (opsional): capture layar silent tanpa dialog. Jika root tidak ada, " +
-                "aplikasi otomatis memakai MediaProjection — Anda akan diminta izin \"Screen Capture\" " +
-                "setiap kali memicu gesture assist. Fitur OCR, translate, dan visual search tetap lengkap."));
+                "• Asisten Digital wajib — setelah di-set, sistem mengirim screenshot otomatis " +
+                "(tanpa dialog izin berulang, sama seperti CircleToSearch AKS-Labs).\n" +
+                "• Root (opsional): fallback silent screencap.\n" +
+                "• MediaProjection: fallback terakhir hanya bila Assist screenshot & root gagal."));
 
         // ================================================================
         // BAGIAN 2: MODEL BAHASA

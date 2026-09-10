@@ -95,6 +95,12 @@ public class OverlayCaptureService extends Service {
     public static final String EXTRA_PROJECTION_RESULT_CODE = "projection_result_code";
     /** Extra dari ProjectionPermissionActivity: data Intent MediaProjection. */
     public static final String EXTRA_PROJECTION_DATA = "projection_data";
+    /**
+     * Path file PNG screenshot yang diberikan sistem lewat
+     * VoiceInteractionSession.onHandleScreenshot() — path utama non-root
+     * tanpa dialog izin berulang (sama seperti AKS-Labs CircleToSearch).
+     */
+    public static final String EXTRA_ASSIST_SCREENSHOT_PATH = "assist_screenshot_path";
 
     private static final String CHANNEL_ID = "circle_search_capture";
     private static final int NOTIF_ID = 1001;
@@ -158,12 +164,36 @@ public class OverlayCaptureService extends Service {
 
     /**
      * Titik masuk capture. Prioritas:
-     *  1. Jika Intent membawa hasil MediaProjection → pakai itu (non-root)
-     *  2. Jika root tersedia → screencap silent
-     *  3. Selain itu → minta izin MediaProjection lewat activity transparan
+     *  1. Screenshot dari sistem (onHandleScreenshot) — non-root, tanpa dialog
+     *  2. Hasil MediaProjection (setelah user izinkan sekali)
+     *  3. Root screencap silent
+     *  4. Minta izin MediaProjection lewat activity transparan
      */
     private void handleCaptureTrigger(Intent intent) {
-        if (intent.hasExtra(EXTRA_PROJECTION_RESULT_CODE)
+        // 1) Screenshot bawaan sistem (Assist API) — path utama non-root
+        String assistPath = intent.getStringExtra(EXTRA_ASSIST_SCREENSHOT_PATH);
+        if (assistPath != null) {
+            Log.d(TAG, "Memakai screenshot sistem (Assist API): " + assistPath);
+            new Thread(() -> {
+                Bitmap bmp = BitmapFactory.decodeFile(assistPath);
+                if (bmp != null) {
+                    fullScreenshot = bmp;
+                    mainHandler.post(this::showSelectionOverlay);
+                } else {
+                    Log.e(TAG, "Gagal decode screenshot assist, coba fallback");
+                    mainHandler.post(() -> handleCaptureFallback(intent));
+                }
+            }, "circlesearch-assist-load").start();
+            return;
+        }
+
+        handleCaptureFallback(intent);
+    }
+
+    private void handleCaptureFallback(Intent intent) {
+        // 2) MediaProjection token sudah ada
+        if (intent != null
+                && intent.hasExtra(EXTRA_PROJECTION_RESULT_CODE)
                 && intent.hasExtra(EXTRA_PROJECTION_DATA)) {
             int resultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, 0);
             Intent data;
@@ -180,21 +210,20 @@ public class OverlayCaptureService extends Service {
             }
         }
 
+        // 3) Root
         if (RootShell.open()) {
             Log.d(TAG, "Root tersedia — screencap silent");
             new Thread(this::doRootScreencapAndShowOverlay, "circlesearch-screencap").start();
             return;
         }
 
-        Log.d(TAG, "Root tidak tersedia — meminta izin MediaProjection");
+        // 4) Minta izin MediaProjection
+        Log.d(TAG, "Fallback terakhir — meminta izin MediaProjection");
         Intent permIntent = new Intent(this, ProjectionPermissionActivity.class);
         permIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
                 | Intent.FLAG_ACTIVITY_NO_ANIMATION);
         startActivity(permIntent);
-        // Service instance ini tidak lagi dibutuhkan; activity akan
-        // startForegroundService ulang dengan hasil izin (atau user
-        // menolak dan tidak ada service baru yang dibuat).
         stopSelf();
     }
 

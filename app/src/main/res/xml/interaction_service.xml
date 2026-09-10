@@ -3,12 +3,16 @@
     Deklarasi wajib untuk VoiceInteractionService.
     sessionService menunjuk ke service yang meng-create session
     tiap kali gesture assist dipicu oleh sistem.
-    supportsAssist=true membuat app ini eligible menerima context
-    layar (opsional, tidak kita pakai karena capture dilakukan manual
-    via root screencap, bukan lewat AssistStructure).
+
+    supportsAssist=true WAJIB agar sistem mengirim screenshot layar
+    ke VoiceInteractionSession.onHandleScreenshot() — ini adalah
+    cara resmi Android agar asisten mendapat gambar layar TANPA
+    MediaProjection dialog dan TANPA root (sama seperti AKS-Labs
+    CircleToSearch).
 -->
 <voice-interaction-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.israfilx.circlesearch.service.MyVoiceInteractionSessionService"
     android:recognitionService="com.israfilx.circlesearch.service.MyVoiceInteractionSessionService"
-    android:supportsAssist="false" />
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true" />
