@@ -38,7 +38,7 @@ public class SelectionActionMenu extends LinearLayout {
             if (listener != null) listener.onSearchVisual();
         });
 
-        Button ocrBtn = makeButton("Aa Translate");
+        Button ocrBtn = makeButton("Translate");
         ocrBtn.setOnClickListener(v -> {
             if (listener != null) listener.onOcrTranslate();
         });

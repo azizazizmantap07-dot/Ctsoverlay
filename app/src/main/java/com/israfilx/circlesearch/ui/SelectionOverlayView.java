@@ -43,6 +43,15 @@ public class SelectionOverlayView extends View {
 
         /** Dipanggil bila user tap sekali tanpa menggambar (dianggap batal). */
         void onSelectionCancelled();
+
+        /**
+         * Dipanggil sekali begitu user mulai menggambar (gerakan jari
+         * pertama yang terdeteksi sebagai drag, bukan sekadar tap).
+         * Dipakai pemanggil untuk menyembunyikan menu awal (mis.
+         * InitialQuickActionMenu) begitu user beralih ke mode seleksi
+         * manual.
+         */
+        void onSelectionStarted();
     }
 
     private final Bitmap frozenScreenshot;
@@ -157,7 +166,11 @@ public class SelectionOverlayView extends View {
                     lassoPath.quadTo(lastX, lastY, (x + lastX) / 2, (y + lastY) / 2);
                     lastX = x;
                     lastY = y;
+                    boolean wasFirstMove = !hasMoved;
                     hasMoved = true;
+                    if (wasFirstMove && listener != null) {
+                        listener.onSelectionStarted();
+                    }
                     invalidate();
                 }
                 return true;

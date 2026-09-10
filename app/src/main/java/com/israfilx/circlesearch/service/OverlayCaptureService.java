@@ -20,6 +20,7 @@ import android.view.WindowManager;
 import androidx.annotation.Nullable;
 
 import com.israfilx.circlesearch.root.RootShell;
+import com.israfilx.circlesearch.ui.InitialQuickActionMenu;
 import com.israfilx.circlesearch.ui.SelectionActionMenu;
 import com.israfilx.circlesearch.ui.SelectionOverlayView;
 import com.israfilx.circlesearch.ui.TranslateResultCard;
@@ -34,10 +35,16 @@ import com.israfilx.circlesearch.util.OcrTranslateHelper;
  * Alur:
  *  1. Trigger diterima -> screencap via root ke file cache internal
  *  2. Load bitmap, tampilkan sebagai overlay full-screen (WindowManager)
- *     dengan SelectionOverlayView di atasnya untuk gambar lasso bebas
- *  3. User selesai menyeleksi -> crop bitmap sesuai path lasso
- *  4. Tampilkan menu aksi (Cari / OCR+Translate) menempel di area crop
- *  5. Aksi dipilih -> proses lalu tutup overlay & service
+ *     dengan SelectionOverlayView di atasnya untuk gambar lasso bebas,
+ *     plus InitialQuickActionMenu di tengah layar (jalan pintas Cari/
+ *     Translate seluruh layar tanpa perlu menyeleksi)
+ *  3a. User pilih "Cari/Translate 1 layar" -> proses fullScreenshot
+ *      langsung, ATAU
+ *  3b. User mulai menggambar lasso -> InitialQuickActionMenu disembunyikan,
+ *      lanjut ke alur seleksi manual seperti biasa
+ *  4. User selesai menyeleksi -> crop bitmap sesuai path lasso
+ *  5. Tampilkan menu aksi (Cari / Translate) menempel di area crop
+ *  6. Aksi dipilih -> proses lalu tutup overlay & service
  */
 public class OverlayCaptureService extends Service {
 
@@ -49,6 +56,7 @@ public class OverlayCaptureService extends Service {
 
     private WindowManager windowManager;
     private SelectionOverlayView selectionView;
+    private InitialQuickActionMenu initialMenu;
     private SelectionActionMenu actionMenu;
     private TranslateResultCard translateResultCard;
     private Bitmap fullScreenshot;
@@ -121,6 +129,14 @@ public class OverlayCaptureService extends Service {
                 Log.d(TAG, "Seleksi dibatalkan (tap tanpa drag) — tutup overlay");
                 closeOverlayAndStop();
             }
+
+            @Override
+            public void onSelectionStarted() {
+                // User mulai menggambar lasso manual — sembunyikan menu
+                // awal (Cari/Translate 1 layar) supaya tidak menghalangi
+                // area yang sedang diseleksi.
+                hideInitialQuickMenu();
+            }
         });
 
         // TYPE_ACCESSIBILITY_OVERLAY sengaja TIDAK dipakai di sini — window
@@ -149,10 +165,69 @@ public class OverlayCaptureService extends Service {
         try {
             windowManager.addView(selectionView, params);
             Log.d(TAG, "Overlay seleksi ditampilkan");
+            showInitialQuickMenu();
         } catch (Exception e) {
             Log.e(TAG, "Gagal menambahkan overlay ke WindowManager — cek izin SYSTEM_ALERT_WINDOW", e);
             stopSelf();
         }
+    }
+
+    /**
+     * Menu awal di tengah layar (Cari 1 layar / Translate 1 layar) —
+     * jalan pintas untuk memproses seluruh screenshot langsung, tanpa
+     * perlu melingkari area tertentu dulu. Ditampilkan begitu overlay
+     * seleksi muncul, dan disembunyikan otomatis begitu user mulai
+     * menggambar lasso manual (lihat onSelectionStarted).
+     */
+    private void showInitialQuickMenu() {
+        initialMenu = new InitialQuickActionMenu(this, new InitialQuickActionMenu.OnQuickActionListener() {
+            @Override
+            public void onSearchFullScreen() {
+                Log.d(TAG, "Aksi: cari 1 layar penuh via Google Lens");
+                boolean sent = LensShareUtil.shareToLens(OverlayCaptureService.this, fullScreenshot);
+                if (!sent) {
+                    Log.e(TAG, "Tidak ada aplikasi yang menerima gambar untuk visual search");
+                }
+                closeOverlayAndStop();
+            }
+
+            @Override
+            public void onTranslateFullScreen() {
+                Log.d(TAG, "Aksi: translate 1 layar penuh");
+                hideInitialQuickMenu();
+                runOcrAndTranslateOnBitmap(fullScreenshot);
+            }
+        });
+
+        int menuType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_SYSTEM_ALERT;
+
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                menuType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT);
+        params.gravity = Gravity.CENTER;
+
+        try {
+            windowManager.addView(initialMenu, params);
+        } catch (Exception e) {
+            Log.e(TAG, "Gagal menambahkan menu awal", e);
+        }
+    }
+
+    private void hideInitialQuickMenu() {
+        mainHandler.post(() -> {
+            try {
+                if (initialMenu != null) {
+                    windowManager.removeView(initialMenu);
+                    initialMenu = null;
+                }
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     private void handleSelectionComplete(RectF bounds) {
@@ -234,7 +309,17 @@ public class OverlayCaptureService extends Service {
             }
         });
 
-        OcrTranslateHelper.recognizeAndTranslate(ocrCrop, new OcrTranslateHelper.ResultCallback() {
+        runOcrAndTranslateOnBitmap(ocrCrop);
+    }
+
+    /**
+     * Jalankan OCR + Translate pada bitmap apapun — dipakai baik untuk
+     * crop hasil seleksi manual (runOcrAndTranslate di atas) maupun
+     * untuk seluruh screenshot layar (jalan pintas "Translate 1 layar"
+     * dari InitialQuickActionMenu).
+     */
+    private void runOcrAndTranslateOnBitmap(Bitmap bitmap) {
+        OcrTranslateHelper.recognizeAndTranslate(bitmap, new OcrTranslateHelper.ResultCallback() {
             @Override
             public void onSuccess(String originalText, String translatedText) {
                 boolean wasTranslated = !originalText.equals(translatedText);
@@ -243,7 +328,7 @@ public class OverlayCaptureService extends Service {
 
             @Override
             public void onNoTextFound() {
-                Log.d(TAG, "Tidak ada teks terdeteksi di area seleksi");
+                Log.d(TAG, "Tidak ada teks terdeteksi");
                 mainHandler.post(OverlayCaptureService.this::closeOverlayAndStop);
             }
 
@@ -269,15 +354,21 @@ public class OverlayCaptureService extends Service {
                 cardType,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
-        cardParams.gravity = Gravity.TOP | Gravity.START;
 
-        RectF bounds = currentBounds != null ? currentBounds : new RectF();
-        int cardX = (int) Math.max(dp(8), Math.min(bounds.left,
-                getResources().getDisplayMetrics().widthPixels - dp(280) - dp(8)));
-        int cardY = (int) Math.min(bounds.bottom + dp(12),
-                getResources().getDisplayMetrics().heightPixels - dp(340));
-        cardParams.x = cardX;
-        cardParams.y = Math.max((int) dp(40), cardY);
+        if (currentBounds != null) {
+            // Ada seleksi manual — tempelkan kartu di dekat area itu.
+            cardParams.gravity = Gravity.TOP | Gravity.START;
+            int cardX = (int) Math.max(dp(8), Math.min(currentBounds.left,
+                    getResources().getDisplayMetrics().widthPixels - dp(280) - dp(8)));
+            int cardY = (int) Math.min(currentBounds.bottom + dp(12),
+                    getResources().getDisplayMetrics().heightPixels - dp(340));
+            cardParams.x = cardX;
+            cardParams.y = Math.max((int) dp(40), cardY);
+        } else {
+            // Mode "Translate 1 layar" (tanpa seleksi manual) — tampilkan
+            // kartu di tengah layar, konsisten dengan posisi InitialQuickActionMenu.
+            cardParams.gravity = Gravity.CENTER;
+        }
 
         try {
             windowManager.addView(translateResultCard, cardParams);
@@ -298,6 +389,13 @@ public class OverlayCaptureService extends Service {
                     selectionView.destroy();
                     windowManager.removeView(selectionView);
                     selectionView = null;
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                if (initialMenu != null) {
+                    windowManager.removeView(initialMenu);
+                    initialMenu = null;
                 }
             } catch (Exception ignored) {
             }
