@@ -146,8 +146,8 @@ public class FloatingTriggerService extends Service {
         expanded = false;
         animating = false;
         pillView = new PillView(this);
-        int pillW = dp(18);
-        int pillH = dp(56);
+        int pillW = dp(9);
+        int pillH = dp(28);
 
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -202,8 +202,8 @@ public class FloatingTriggerService extends Service {
 
         final int startW = params.width;
         final int startH = params.height;
-        final int endW = dp(48);
-        final int endH = dp(48);
+        final int endW = dp(40);
+        final int endH = dp(40);
         final int startX = params.x;
         final int endX = dp(8);
 
@@ -244,8 +244,8 @@ public class FloatingTriggerService extends Service {
 
         final int startW = params.width;
         final int startH = params.height;
-        final int endW = dp(18);
-        final int endH = dp(56);
+        final int endW = dp(9);
+        final int endH = dp(28);
         final int startX = params.x;
         final int endX = 0;
 
@@ -347,7 +347,7 @@ public class FloatingTriggerService extends Service {
         PillView(Context ctx) {
             super(ctx);
             fillPaint.setStyle(Paint.Style.FILL);
-            fillPaint.setColor(Color.argb(160, 30, 136, 229));
+            fillPaint.setColor(Color.argb(150, 0, 0, 0));
             dotPaint.setColor(Color.WHITE);
             dotPaint.setStyle(Paint.Style.FILL);
         }
@@ -452,6 +452,12 @@ public class FloatingTriggerService extends Service {
                         } catch (Exception ignored) {
                         }
                         savePosition();
+                        // Klik (tanpa drag) → expand jadi tombol bulat
+                        // (alternatif swipe kanan, agar tidak bentrok gesture back)
+                        if (!moved || (Math.abs(event.getRawX() - downX) < 12
+                                && Math.abs(event.getRawY() - downY) < 12)) {
+                            animateExpand();
+                        }
                     }
                     return true;
             }
