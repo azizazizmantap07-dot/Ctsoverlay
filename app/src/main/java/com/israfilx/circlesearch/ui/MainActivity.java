@@ -76,8 +76,7 @@ public class MainActivity extends Activity {
         TextView subtitle = bodyText(
                 "Menu pengaturan perizinan dan model bahasa.\n" +
                 "Aplikasi dipicu lewat gesture asisten (swipe sudut bawah / long-press power) " +
-                "setelah diatur sebagai Asisten Digital.\n" +
-                "Berjalan penuh di perangkat root maupun non-root.");
+                "setelah diatur sebagai Asisten Digital.");
         root.addView(subtitle);
 
         // ================================================================
@@ -86,8 +85,9 @@ public class MainActivity extends Activity {
         root.addView(sectionHeader("1. Perizinan yang Diperlukan"));
 
         root.addView(bodyText(
-                "Semua perizinan di bawah ini wajib diaktifkan agar aplikasi berfungsi penuh. " +
-                "Ketuk tombol untuk langsung diarahkan ke halaman pengaturan yang sesuai."));
+                "Overlay dan Asisten Digital wajib diaktifkan. Root bersifat opsional " +
+                "(tanpa root tetap bisa dipakai lewat MediaProjection). " +
+                "Ketuk tombol untuk diarahkan ke halaman pengaturan yang sesuai."));
 
         // --- Overlay (tampil di atas aplikasi lain) ---
         root.addView(itemLabel("Tampil di atas aplikasi lain (Overlay)"));
@@ -109,8 +109,8 @@ public class MainActivity extends Activity {
         btnSetAssistantRoot.setOnClickListener(v -> runSetupAssistantRoot());
         root.addView(btnSetAssistantRoot);
 
-        // --- Root (opsional) ---
-        root.addView(itemLabel("Akses Root (opsional)"));
+        // --- Root ---
+        root.addView(itemLabel("Akses Root"));
         statusRoot = statusText();
         root.addView(statusRoot);
         Button btnCheckRoot = actionButton("Cek akses root");
@@ -119,11 +119,12 @@ public class MainActivity extends Activity {
 
         // --- Info tambahan ---
         root.addView(bodyText(
-                "Catatan:\n" +
-                "• Overlay diperlukan agar layer seleksi dan terjemahan bisa ditampilkan di atas aplikasi lain.\n" +
-                "• Asisten Digital diperlukan agar gesture assist sistem memanggil aplikasi ini.\n" +
-                "• Root OPSIONAL: bila tersedia, capture layar tanpa dialog. Tanpa root, aplikasi memakai MediaProjection " +
-                "(dialog izin sistem muncul sekali setiap trigger) — seluruh fitur tetap sama penuh."));
+                "Catatan (mode dual root / non-root):\n" +
+                "• Overlay wajib agar layer seleksi & terjemahan tampil di atas aplikasi lain.\n" +
+                "• Asisten Digital wajib agar gesture assist sistem memanggil aplikasi ini.\n" +
+                "• Root (opsional): capture layar silent tanpa dialog. Jika root tidak ada, " +
+                "aplikasi otomatis memakai MediaProjection — Anda akan diminta izin \"Screen Capture\" " +
+                "setiap kali memicu gesture assist. Fitur OCR, translate, dan visual search tetap lengkap."));
 
         // ================================================================
         // BAGIAN 2: MODEL BAHASA

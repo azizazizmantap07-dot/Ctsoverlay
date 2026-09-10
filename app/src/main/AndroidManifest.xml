@@ -10,7 +10,7 @@
     <!-- Foreground service (session capture berjalan singkat tapi perlu foreground agar tidak dibunuh) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!-- Diperlukan untuk jalur capture non-root via MediaProjection (Android 14+) -->
+    <!-- Diperlukan untuk capture non-root lewat MediaProjection (Android 14+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <!-- Simpan crop sementara untuk dikirim via Intent (pencarian visual
@@ -101,24 +101,8 @@
         </activity>
 
         <!--
-            Activity transparan untuk meminta izin MediaProjection (jalur
-            non-root). Dipanggil dari OverlayCaptureService bila root tidak
-            tersedia. Setelah user mengizinkan/menolak, hasil dikirim kembali
-            ke service lalu activity langsung finish().
-        -->
-        <activity
-            android:name=".ui.ProjectionRequestActivity"
-            android:exported="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
-            android:excludeFromRecents="true"
-            android:noHistory="true"
-            android:taskAffinity=""
-            android:launchMode="singleTask" />
-
-        <!--
             VoiceInteractionService: ini "pintu masuk" trigger utama.
-            Begitu app ini di-set sebagai default assistant (via root settings
-            ATAU secara manual di Settings → Asisten Digital),
+            Begitu app ini di-set sebagai default assistant (via root settings),
             sistem akan memanggil onLaunchVoiceAssist() / SessionService saat
             gesture assist (swipe pojok bawah / long-press power) dipicu.
         -->
@@ -141,10 +125,22 @@
             android:exported="true" />
 
         <!--
+            Activity transparan untuk meminta izin MediaProjection
+            (Screen Capture) pada perangkat non-root.
+        -->
+        <activity
+            android:name=".ui.ProjectionPermissionActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:launchMode="singleTask" />
+
+        <!--
             Foreground service tempat capture (root screencap ATAU
-            MediaProjection non-root) + overlay selection dijalankan.
-            foregroundServiceType mencakup specialUse (root path) dan
-            mediaProjection (non-root path) agar lolos persyaratan Android 14+.
+            MediaProjection) + overlay selection dijalankan.
+            Type digabung: specialUse (root path) + mediaProjection (non-root).
         -->
         <service
             android:name=".service.OverlayCaptureService"
