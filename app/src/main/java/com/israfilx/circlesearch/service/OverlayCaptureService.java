@@ -12,17 +12,10 @@ import android.graphics.BitmapFactory;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
-import android.hardware.display.DisplayManager;
-import android.hardware.display.VirtualDisplay;
-import android.media.Image;
-import android.media.ImageReader;
-import android.media.projection.MediaProjection;
-import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -35,7 +28,6 @@ import androidx.annotation.Nullable;
 import com.israfilx.circlesearch.root.RootShell;
 import com.israfilx.circlesearch.ui.BottomIconMenu;
 import com.israfilx.circlesearch.ui.LoadingStatusView;
-import com.israfilx.circlesearch.ui.ProjectionPermissionActivity;
 import com.israfilx.circlesearch.ui.RainbowGlowView;
 import com.israfilx.circlesearch.ui.SelectionOverlayView;
 import com.israfilx.circlesearch.ui.TranslationOverlayView;
@@ -43,7 +35,6 @@ import com.israfilx.circlesearch.util.BitmapCropUtil;
 import com.israfilx.circlesearch.util.ImageSearchShareUtil;
 import com.israfilx.circlesearch.util.OcrTranslateHelper;
 
-import java.nio.ByteBuffer;
 import java.util.List;
 
 /**
@@ -91,16 +82,13 @@ public class OverlayCaptureService extends Service {
     private static final String TAG = "CircleSearch/Capture";
     public static final String ACTION_START_CAPTURE = "com.israfilx.circlesearch.action.START_CAPTURE";
 
-    /** Extra dari ProjectionPermissionActivity: resultCode MediaProjection. */
-    public static final String EXTRA_PROJECTION_RESULT_CODE = "projection_result_code";
-    /** Extra dari ProjectionPermissionActivity: data Intent MediaProjection. */
-    public static final String EXTRA_PROJECTION_DATA = "projection_data";
     /**
      * Path file PNG screenshot yang diberikan sistem lewat
-     * VoiceInteractionSession.onHandleScreenshot() — path utama non-root
-     * tanpa dialog izin berulang (sama seperti AKS-Labs CircleToSearch).
+     * VoiceInteractionSession.onHandleScreenshot().
      */
     public static final String EXTRA_ASSIST_SCREENSHOT_PATH = "assist_screenshot_path";
+    /** True bila trigger berasal dari floating pill (bukan Assist). */
+    public static final String EXTRA_FROM_FLOATING = "from_floating";
 
     private static final String CHANNEL_ID = "circle_search_capture";
     private static final int NOTIF_ID = 1001;
@@ -115,10 +103,6 @@ public class OverlayCaptureService extends Service {
     private Bitmap currentCrop;
     private RectF currentBounds;
 
-    private MediaProjection mediaProjection;
-    private VirtualDisplay virtualDisplay;
-    private ImageReader imageReader;
-
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     @Override
@@ -131,23 +115,25 @@ public class OverlayCaptureService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_START_CAPTURE.equals(intent.getAction())) {
-            // Reset state dari sesi sebelumnya agar trigger ke-2, ke-3, ...
-            // selalu bisa jalan tanpa force-stop app.
             resetCaptureState();
-
-            // Harus startForeground SEBELUM getMediaProjection (syarat Android 14+).
-            boolean forProjection = intent.hasExtra(EXTRA_PROJECTION_RESULT_CODE)
-                    && intent.hasExtra(EXTRA_PROJECTION_DATA);
-            startForegroundWithType(forProjection);
+            startForegroundWithType();
             handleCaptureTrigger(intent);
         }
         return START_NOT_STICKY;
     }
 
+    private void startForegroundWithType() {
+        Notification notification = buildNotification();
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIF_ID, notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else {
+            startForeground(NOTIF_ID, notification);
+        }
+    }
+
     /**
      * Bersihkan window overlay + flag + bitmap lama dari sesi sebelumnya.
-     * Wajib dipanggil di awal setiap trigger baru supaya service yang masih
-     * hidup (belum onDestroy) bisa dipakai ulang dengan aman.
      */
     private void resetCaptureState() {
         closing = false;
@@ -204,40 +190,15 @@ public class OverlayCaptureService extends Service {
         }
         currentCrop = null;
         currentBounds = null;
-
-        releaseProjectionResources();
-    }
-
-    private void startForegroundWithType(boolean mediaProjectionPath) {
-        Notification notification = buildNotification();
-        if (Build.VERSION.SDK_INT >= 34) {
-            int type = mediaProjectionPath
-                    ? android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                    : android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
-            startForeground(NOTIF_ID, notification, type);
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            int type = mediaProjectionPath
-                    ? android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                    : 0;
-            if (type != 0) {
-                startForeground(NOTIF_ID, notification, type);
-            } else {
-                startForeground(NOTIF_ID, notification);
-            }
-        } else {
-            startForeground(NOTIF_ID, notification);
-        }
     }
 
     /**
-     * Titik masuk capture. Prioritas:
-     *  1. Screenshot dari sistem (onHandleScreenshot) — non-root, tanpa dialog
-     *  2. Hasil MediaProjection (setelah user izinkan sekali)
-     *  3. Root screencap silent
-     *  4. Minta izin MediaProjection lewat activity transparan
+     * Prioritas capture:
+     *  1. Screenshot Assist API (dari VoiceInteractionSession)
+     *  2. Root screencap
+     *  3. AccessibilityService.takeScreenshot (floating / non-assistant)
      */
     private void handleCaptureTrigger(Intent intent) {
-        // 1) Screenshot bawaan sistem (Assist API) — path utama non-root
         String assistPath = intent.getStringExtra(EXTRA_ASSIST_SCREENSHOT_PATH);
         if (assistPath != null) {
             Log.d(TAG, "Memakai screenshot sistem (Assist API): " + assistPath);
@@ -248,50 +209,55 @@ public class OverlayCaptureService extends Service {
                     mainHandler.post(this::showSelectionOverlay);
                 } else {
                     Log.e(TAG, "Gagal decode screenshot assist, coba fallback");
-                    mainHandler.post(() -> handleCaptureFallback(intent));
+                    mainHandler.post(() -> handleCaptureFallback());
                 }
             }, "circlesearch-assist-load").start();
             return;
         }
 
-        handleCaptureFallback(intent);
+        handleCaptureFallback();
     }
 
-    private void handleCaptureFallback(Intent intent) {
-        // 2) MediaProjection token sudah ada
-        if (intent != null
-                && intent.hasExtra(EXTRA_PROJECTION_RESULT_CODE)
-                && intent.hasExtra(EXTRA_PROJECTION_DATA)) {
-            int resultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, 0);
-            Intent data;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                data = intent.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent.class);
-            } else {
-                data = intent.getParcelableExtra(EXTRA_PROJECTION_DATA);
-            }
-            if (resultCode != 0 && data != null) {
-                Log.d(TAG, "Memakai MediaProjection (non-root)");
-                new Thread(() -> doMediaProjectionCapture(resultCode, data),
-                        "circlesearch-mp-capture").start();
-                return;
-            }
-        }
-
-        // 3) Root
+    private void handleCaptureFallback() {
         if (RootShell.open()) {
             Log.d(TAG, "Root tersedia — screencap silent");
             new Thread(this::doRootScreencapAndShowOverlay, "circlesearch-screencap").start();
             return;
         }
 
-        // 4) Minta izin MediaProjection
-        Log.d(TAG, "Fallback terakhir — meminta izin MediaProjection");
-        Intent permIntent = new Intent(this, ProjectionPermissionActivity.class);
-        permIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-        startActivity(permIntent);
-        stopSelf();
+        if (ScreenshotAccessibilityService.isAvailable()) {
+            Log.d(TAG, "Memakai AccessibilityService.takeScreenshot");
+            ScreenshotAccessibilityService.takeScreenshot(
+                    new ScreenshotAccessibilityService.ScreenshotCallback() {
+                        @Override
+                        public void onSuccess(Bitmap bitmap) {
+                            fullScreenshot = bitmap;
+                            mainHandler.post(() -> showSelectionOverlay());
+                        }
+
+                        @Override
+                        public void onFailure(String reason) {
+                            Log.e(TAG, "A11y screenshot gagal: " + reason);
+                            mainHandler.post(() -> {
+                                Toast.makeText(OverlayCaptureService.this,
+                                        "Gagal tangkap layar: " + reason,
+                                        Toast.LENGTH_SHORT).show();
+                                notifyFloatingOverlayClosed();
+                                stopSelf();
+                            });
+                        }
+                    });
+            return;
+        }
+
+        Log.e(TAG, "Tidak ada metode capture (Assist/Root/Accessibility)");
+        mainHandler.post(() -> {
+            Toast.makeText(this,
+                    "Aktifkan Asisten Digital, Root, atau Accessibility untuk capture",
+                    Toast.LENGTH_LONG).show();
+            notifyFloatingOverlayClosed();
+            stopSelf();
+        });
     }
 
     private void doRootScreencapAndShowOverlay() {
@@ -300,14 +266,20 @@ public class OverlayCaptureService extends Service {
 
         if (!ok) {
             Log.e(TAG, "screencap root gagal, membatalkan overlay");
-            mainHandler.post(this::stopSelf);
+            mainHandler.post(() -> {
+                notifyFloatingOverlayClosed();
+                stopSelf();
+            });
             return;
         }
 
         Bitmap bmp = BitmapFactory.decodeFile(capPath);
         if (bmp == null) {
             Log.e(TAG, "Gagal decode hasil screencap root");
-            mainHandler.post(this::stopSelf);
+            mainHandler.post(() -> {
+                notifyFloatingOverlayClosed();
+                stopSelf();
+            });
             return;
         }
 
@@ -315,146 +287,11 @@ public class OverlayCaptureService extends Service {
         mainHandler.post(this::showSelectionOverlay);
     }
 
-    /**
-     * Capture satu frame layar lewat MediaProjection + VirtualDisplay + ImageReader.
-     * Dipakai pada perangkat non-root setelah user mengizinkan Screen Capture.
-     */
-    private void doMediaProjectionCapture(int resultCode, Intent data) {
-        try {
-            MediaProjectionManager mpm =
-                    (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-            if (mpm == null) {
-                Log.e(TAG, "MediaProjectionManager null");
-                mainHandler.post(this::stopSelf);
-                return;
-            }
-
-            mediaProjection = mpm.getMediaProjection(resultCode, data);
-            if (mediaProjection == null) {
-                Log.e(TAG, "getMediaProjection mengembalikan null");
-                mainHandler.post(this::stopSelf);
-                return;
-            }
-
-            // Callback wajib di Android 14+ sebelum createVirtualDisplay
-            mediaProjection.registerCallback(new MediaProjection.Callback() {
-                @Override
-                public void onStop() {
-                    Log.d(TAG, "MediaProjection dihentikan sistem");
-                    releaseProjectionResources();
-                }
-            }, mainHandler);
-
-            DisplayMetrics metrics = new DisplayMetrics();
-            windowManager.getDefaultDisplay().getRealMetrics(metrics);
-            final int width = metrics.widthPixels;
-            final int height = metrics.heightPixels;
-            final int density = metrics.densityDpi;
-
-            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
-
-            final Object lock = new Object();
-            final Bitmap[] resultHolder = new Bitmap[1];
-
-            imageReader.setOnImageAvailableListener(reader -> {
-                Image image = null;
-                try {
-                    image = reader.acquireLatestImage();
-                    if (image == null) return;
-
-                    Image.Plane[] planes = image.getPlanes();
-                    ByteBuffer buffer = planes[0].getBuffer();
-                    int pixelStride = planes[0].getPixelStride();
-                    int rowStride = planes[0].getRowStride();
-                    int rowPadding = rowStride - pixelStride * width;
-
-                    Bitmap raw = Bitmap.createBitmap(
-                            width + rowPadding / pixelStride,
-                            height,
-                            Bitmap.Config.ARGB_8888);
-                    raw.copyPixelsFromBuffer(buffer);
-
-                    Bitmap cropped = Bitmap.createBitmap(raw, 0, 0, width, height);
-                    if (cropped != raw) {
-                        raw.recycle();
-                    }
-
-                    synchronized (lock) {
-                        resultHolder[0] = cropped;
-                        lock.notifyAll();
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "Gagal membaca frame MediaProjection", e);
-                    synchronized (lock) {
-                        lock.notifyAll();
-                    }
-                } finally {
-                    if (image != null) {
-                        image.close();
-                    }
-                }
-            }, mainHandler);
-
-            virtualDisplay = mediaProjection.createVirtualDisplay(
-                    "CircleSearchCapture",
-                    width, height, density,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    imageReader.getSurface(),
-                    null, null);
-
-            synchronized (lock) {
-                if (resultHolder[0] == null) {
-                    try {
-                        lock.wait(3000);
-                    } catch (InterruptedException ignored) {
-                    }
-                }
-            }
-
-            releaseProjectionResources();
-
-            Bitmap bmp = resultHolder[0];
-            if (bmp == null) {
-                Log.e(TAG, "Timeout / gagal mendapatkan frame MediaProjection");
-                mainHandler.post(() -> {
-                    Toast.makeText(this, "Gagal menangkap layar", Toast.LENGTH_SHORT).show();
-                    stopSelf();
-                });
-                return;
-            }
-
-            fullScreenshot = bmp;
-            mainHandler.post(this::showSelectionOverlay);
-
-        } catch (Exception e) {
-            Log.e(TAG, "Exception saat MediaProjection capture", e);
-            releaseProjectionResources();
-            mainHandler.post(this::stopSelf);
-        }
-    }
-
-    private void releaseProjectionResources() {
-        try {
-            if (virtualDisplay != null) {
-                virtualDisplay.release();
-                virtualDisplay = null;
-            }
-        } catch (Exception ignored) {
-        }
-        try {
-            if (imageReader != null) {
-                imageReader.close();
-                imageReader = null;
-            }
-        } catch (Exception ignored) {
-        }
-        try {
-            if (mediaProjection != null) {
-                mediaProjection.stop();
-                mediaProjection = null;
-            }
-        } catch (Exception ignored) {
-        }
+    /** Beri tahu FloatingTriggerService agar menampilkan pil lagi. */
+    private void notifyFloatingOverlayClosed() {
+        Intent i = new Intent(FloatingTriggerService.ACTION_OVERLAY_CLOSED);
+        i.setPackage(getPackageName());
+        sendBroadcast(i);
     }
 
     private void showSelectionOverlay() {
@@ -1099,7 +936,7 @@ public class OverlayCaptureService extends Service {
             currentCrop = null;
             currentBounds = null;
 
-            releaseProjectionResources();
+            notifyFloatingOverlayClosed();
             stopSelf();
         });
     }
@@ -1133,8 +970,6 @@ public class OverlayCaptureService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
-
-        releaseProjectionResources();
 
         // Jaring pengaman terakhir: kalau service ini berhenti lewat
         // jalur manapun (dibunuh sistem, exception tak tertangani, atau

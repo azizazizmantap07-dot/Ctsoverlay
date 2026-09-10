@@ -3,6 +3,7 @@ package com.israfilx.circlesearch.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -22,6 +23,8 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.israfilx.circlesearch.root.RootShell;
+import com.israfilx.circlesearch.service.FloatingTriggerService;
+import com.israfilx.circlesearch.service.ScreenshotAccessibilityService;
 import com.israfilx.circlesearch.util.OcrTranslateHelper;
 
 import java.util.HashSet;
@@ -47,6 +50,8 @@ public class MainActivity extends Activity {
     private TextView statusOverlay;
     private TextView statusAssistant;
     private TextView statusRoot;
+    private TextView statusFloating;
+    private TextView statusA11y;
     private TextView languageStatusText;
     private LinearLayout languageListContainer;
     private ProgressBar downloadProgress;
@@ -85,9 +90,8 @@ public class MainActivity extends Activity {
         root.addView(sectionHeader("1. Perizinan yang Diperlukan"));
 
         root.addView(bodyText(
-                "Overlay dan Asisten Digital wajib diaktifkan. Root bersifat opsional " +
-                "(tanpa root tetap bisa dipakai lewat MediaProjection). " +
-                "Ketuk tombol untuk diarahkan ke halaman pengaturan yang sesuai."));
+                "Overlay wajib. Asisten Digital ATAU Floating Trigger (+ Accessibility) " +
+                "untuk memicu capture. Root opsional. Ketuk tombol untuk pengaturan."));
 
         // --- Overlay (tampil di atas aplikasi lain) ---
         root.addView(itemLabel("Tampil di atas aplikasi lain (Overlay)"));
@@ -117,14 +121,29 @@ public class MainActivity extends Activity {
         btnCheckRoot.setOnClickListener(v -> checkRoot());
         root.addView(btnCheckRoot);
 
+        // --- Floating Trigger (opsional) ---
+        root.addView(itemLabel("Floating Trigger (pil tepi layar)"));
+        statusFloating = statusText();
+        root.addView(statusFloating);
+        Button btnToggleFloating = actionButton("Aktifkan / Nonaktifkan Floating");
+        btnToggleFloating.setOnClickListener(v -> toggleFloatingTrigger());
+        root.addView(btnToggleFloating);
+
+        root.addView(itemLabel("Accessibility (screenshot untuk floating)"));
+        statusA11y = statusText();
+        root.addView(statusA11y);
+        Button btnA11y = actionButton("Buka pengaturan Accessibility");
+        btnA11y.setOnClickListener(v -> openAccessibilitySettings());
+        root.addView(btnA11y);
+
         // --- Info tambahan ---
         root.addView(bodyText(
-                "Catatan (prioritas capture):\n" +
-                "• Overlay wajib agar layer seleksi & terjemahan tampil di atas aplikasi lain.\n" +
-                "• Asisten Digital wajib — setelah di-set, sistem mengirim screenshot otomatis " +
-                "(tanpa dialog izin berulang, sama seperti CircleToSearch AKS-Labs).\n" +
-                "• Root (opsional): fallback silent screencap.\n" +
-                "• MediaProjection: fallback terakhir hanya bila Assist screenshot & root gagal."));
+                "Catatan:\n" +
+                "• Overlay wajib untuk menampilkan layer seleksi.\n" +
+                "• Asisten Digital: trigger gesture + screenshot sistem (tanpa dialog).\n" +
+                "• Floating Trigger: pil tipis di tepi kiri — swipe kanan jadi tombol, " +
+                "tap untuk memicu. Butuh Accessibility (Android 11+) bila tanpa root/asisten.\n" +
+                "• Root (opsional): screencap silent sebagai fallback."));
 
         // ================================================================
         // BAGIAN 2: MODEL BAHASA
@@ -175,6 +194,22 @@ public class MainActivity extends Activity {
         super.onResume();
         refreshPermissionStatus();
         refreshLanguageStatus();
+        ensureFloatingRunning();
+    }
+
+    /** Jika user sebelumnya mengaktifkan floating, pastikan service jalan. */
+    private void ensureFloatingRunning() {
+        boolean on = getSharedPreferences(FloatingTriggerService.PREFS, MODE_PRIVATE)
+                .getBoolean(FloatingTriggerService.KEY_ENABLED, false);
+        if (on && Settings.canDrawOverlays(this)) {
+            Intent i = new Intent(this, FloatingTriggerService.class);
+            i.setAction(FloatingTriggerService.ACTION_SHOW);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
+        }
     }
 
     // ----------------------------------------------------------------
@@ -204,6 +239,65 @@ public class MainActivity extends Activity {
         // Root (cek cepat tanpa blocking lama)
         statusRoot.setText("Menekan tombol \"Cek akses root\" untuk memeriksa…");
         statusRoot.setTextColor(Color.GRAY);
+
+        // Floating
+        boolean floatingOn = getSharedPreferences(FloatingTriggerService.PREFS, MODE_PRIVATE)
+                .getBoolean(FloatingTriggerService.KEY_ENABLED, false);
+        if (statusFloating != null) {
+            statusFloating.setText(floatingOn
+                    ? "✓ Floating Trigger AKTIF (pil di tepi kiri)"
+                    : "○ Floating Trigger nonaktif");
+            statusFloating.setTextColor(floatingOn
+                    ? Color.parseColor("#2E7D32") : Color.GRAY);
+        }
+
+        // Accessibility
+        boolean a11y = ScreenshotAccessibilityService.isAvailable();
+        if (statusA11y != null) {
+            statusA11y.setText(a11y
+                    ? "✓ Accessibility aktif (screenshot siap)"
+                    : "✗ Accessibility belum aktif — wajib untuk floating tanpa root");
+            statusA11y.setTextColor(a11y
+                    ? Color.parseColor("#2E7D32") : Color.parseColor("#C62828"));
+        }
+    }
+
+    private void toggleFloatingTrigger() {
+        SharedPreferences prefs = getSharedPreferences(FloatingTriggerService.PREFS, MODE_PRIVATE);
+        boolean currently = prefs.getBoolean(FloatingTriggerService.KEY_ENABLED, false);
+        boolean next = !currently;
+        prefs.edit().putBoolean(FloatingTriggerService.KEY_ENABLED, next).apply();
+
+        Intent i = new Intent(this, FloatingTriggerService.class);
+        if (next) {
+            if (!Settings.canDrawOverlays(this)) {
+                Toast.makeText(this, "Aktifkan izin Overlay dulu", Toast.LENGTH_SHORT).show();
+                prefs.edit().putBoolean(FloatingTriggerService.KEY_ENABLED, false).apply();
+                openOverlaySettings();
+                refreshPermissionStatus();
+                return;
+            }
+            i.setAction(FloatingTriggerService.ACTION_SHOW);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
+            Toast.makeText(this, "Floating Trigger diaktifkan", Toast.LENGTH_SHORT).show();
+        } else {
+            i.setAction(FloatingTriggerService.ACTION_HIDE);
+            stopService(i);
+            Toast.makeText(this, "Floating Trigger dimatikan", Toast.LENGTH_SHORT).show();
+        }
+        refreshPermissionStatus();
+    }
+
+    private void openAccessibilitySettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        } catch (Exception e) {
+            openAppSettings();
+        }
     }
 
     private void checkRoot() {

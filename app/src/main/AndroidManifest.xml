@@ -4,14 +4,15 @@
     <!-- Overlay UI untuk selection layer -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
+    <!-- Accessibility minimal: hanya takeScreenshot untuk floating trigger -->
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
+
     <!-- Dibutuhkan agar app bisa terdaftar sebagai default Assistant / VoiceInteractionService -->
     <uses-permission android:name="android.permission.BIND_VOICE_INTERACTION" />
 
     <!-- Foreground service (session capture berjalan singkat tapi perlu foreground agar tidak dibunuh) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!-- Diperlukan untuk capture non-root lewat MediaProjection (Android 14+) -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <!-- Simpan crop sementara untuk dikirim via Intent (pencarian visual
          non-Google — lihat ImageSearchShareUtil) -->
@@ -125,30 +126,38 @@
             android:exported="true" />
 
         <!--
-            Activity transparan untuk meminta izin MediaProjection
-            (Screen Capture) pada perangkat non-root.
-        -->
-        <activity
-            android:name=".ui.ProjectionPermissionActivity"
-            android:exported="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
-            android:excludeFromRecents="true"
-            android:noHistory="true"
-            android:taskAffinity=""
-            android:launchMode="singleTask" />
-
-        <!--
-            Foreground service tempat capture (root screencap ATAU
-            MediaProjection) + overlay selection dijalankan.
-            Type digabung: specialUse (root path) + mediaProjection (non-root).
+            Foreground service tempat capture + overlay selection.
         -->
         <service
             android:name=".service.OverlayCaptureService"
             android:exported="false"
-            android:foregroundServiceType="specialUse|mediaProjection">
+            android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="screen-overlay-capture" />
+        </service>
+
+
+        <service
+            android:name=".service.FloatingTriggerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="floating-trigger-pill" />
+        </service>
+
+        <service
+            android:name=".service.ScreenshotAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="Circle Search Screenshot">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/screenshot_accessibility_config" />
         </service>
 
         <!--
