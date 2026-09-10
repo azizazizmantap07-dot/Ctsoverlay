@@ -76,7 +76,8 @@ public class MainActivity extends Activity {
         TextView subtitle = bodyText(
                 "Menu pengaturan perizinan dan model bahasa.\n" +
                 "Aplikasi dipicu lewat gesture asisten (swipe sudut bawah / long-press power) " +
-                "setelah diatur sebagai Asisten Digital.");
+                "setelah diatur sebagai Asisten Digital.\n" +
+                "Berjalan penuh di perangkat root maupun non-root.");
         root.addView(subtitle);
 
         // ================================================================
@@ -108,8 +109,8 @@ public class MainActivity extends Activity {
         btnSetAssistantRoot.setOnClickListener(v -> runSetupAssistantRoot());
         root.addView(btnSetAssistantRoot);
 
-        // --- Root ---
-        root.addView(itemLabel("Akses Root"));
+        // --- Root (opsional) ---
+        root.addView(itemLabel("Akses Root (opsional)"));
         statusRoot = statusText();
         root.addView(statusRoot);
         Button btnCheckRoot = actionButton("Cek akses root");
@@ -121,7 +122,8 @@ public class MainActivity extends Activity {
                 "Catatan:\n" +
                 "• Overlay diperlukan agar layer seleksi dan terjemahan bisa ditampilkan di atas aplikasi lain.\n" +
                 "• Asisten Digital diperlukan agar gesture assist sistem memanggil aplikasi ini.\n" +
-                "• Root diperlukan untuk captur layar penuh (screencap) tanpa MediaProjection dialog."));
+                "• Root OPSIONAL: bila tersedia, capture layar tanpa dialog. Tanpa root, aplikasi memakai MediaProjection " +
+                "(dialog izin sistem muncul sekali setiap trigger) — seluruh fitur tetap sama penuh."));
 
         // ================================================================
         // BAGIAN 2: MODEL BAHASA
