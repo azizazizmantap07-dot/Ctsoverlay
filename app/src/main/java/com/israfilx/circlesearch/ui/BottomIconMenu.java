@@ -4,19 +4,29 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * Menu aksi tunggal berupa dua ikon (kaca pembesar = cari visual, ikon
- * translate = OCR & terjemahkan), selalu ditempatkan menempel di bagian
- * PALING BAWAH layar — bukan di tengah atau menempel area seleksi —
- * supaya tidak pernah menghalangi pemandangan/konten yang sedang dilihat
- * user, baik dipakai untuk:
+ * Menu aksi berupa tiga ikon (kaca pembesar = cari visual, ikon
+ * translate = OCR & terjemahkan, ikon ✕ = tutup overlay), selalu
+ * ditempatkan menempel di bagian PALING BAWAH layar — bukan di tengah
+ * atau menempel area seleksi — supaya tidak pernah menghalangi
+ * pemandangan/konten yang sedang dilihat user, baik dipakai untuk:
  *  - Mode "1 layar": tap salah satu ikon langsung memproses seluruh
  *    screenshot, tanpa perlu menyeleksi dulu.
  *  - Mode lasso: muncul (di posisi bawah yang sama) setelah user selesai
  *    melingkari area tertentu, aksinya berlaku untuk area yang dilingkari.
+ *
+ * Ikon ✕ SENGAJA ditambahkan sebagai jalan keluar eksplisit yang selalu
+ * bisa ditekan, terlepas dari overlay lain apa yang sedang tampil di
+ * atasnya (mis. TranslationOverlayView). Sebelumnya satu-satunya cara
+ * menutup overlay terjemahan adalah tap di area "kosong" — kalau tap itu
+ * jatuh di view lain yang ikut menyerap sentuhan (mis. area BottomIconMenu
+ * sendiri di luar kedua ikon lama), tidak ada listener yang menutup
+ * overlay dan window overlay bisa menempel permanen sampai proses
+ * dihentikan paksa (force-stop).
  *
  * Menggantikan InitialQuickActionMenu (dialog tengah layar) dan
  * SelectionActionMenu (menempel di bawah area crop) — kini keduanya
@@ -27,6 +37,7 @@ public class BottomIconMenu extends LinearLayout {
     public interface OnActionListener {
         void onSearchVisual();
         void onTranslate();
+        void onClose();
     }
 
     public BottomIconMenu(Context context, OnActionListener listener) {
@@ -57,6 +68,27 @@ public class BottomIconMenu extends LinearLayout {
             if (listener != null) listener.onTranslate();
         });
         addView(translateIcon);
+
+        addView(spacer());
+
+        // Tombol tutup eksplisit — selalu ada, selalu berfungsi, tidak
+        // bergantung pada tap-di-luar-area yang bisa nyasar ke view lain.
+        TextView closeIcon = makeIconButton("✕");
+        closeIcon.setOnClickListener(v -> {
+            if (listener != null) listener.onClose();
+        });
+        addView(closeIcon);
+
+        // Animasi masuk halus (fade + slide-up sedikit) supaya kemunculan
+        // menu tidak terasa "muncul tiba-tiba" (snap).
+        setAlpha(0f);
+        setTranslationY(dp(24));
+        animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(220)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
     }
 
     private TextView makeIconButton(String glyph) {

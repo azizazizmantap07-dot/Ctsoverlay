@@ -15,6 +15,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.animation.DecelerateInterpolator;
 import android.view.animation.LinearInterpolator;
 
 /**
@@ -93,6 +94,16 @@ public class SelectionOverlayView extends View {
 
         setWillNotDraw(false);
         startMarchingAnts();
+
+        // Animasi fade-in halus saat overlay seleksi pertama kali muncul
+        // (begitu screencap selesai) — supaya transisi dari layar app
+        // biasa ke tampilan "beku + dim" terasa smooth, bukan snap tiba-tiba.
+        setAlpha(0f);
+        animate()
+                .alpha(1f)
+                .setDuration(180)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
     }
 
     public void setOnSelectionListener(OnSelectionListener l) {

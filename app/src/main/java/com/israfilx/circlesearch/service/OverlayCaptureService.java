@@ -209,6 +209,17 @@ public class OverlayCaptureService extends Service {
                 removeTranslationOverlayIfShown();
                 runOcrAndTranslate();
             }
+
+            @Override
+            public void onClose() {
+                // Jalan keluar EKSPLISIT yang selalu berfungsi, terlepas
+                // dari overlay lain apa yang sedang tampil di atasnya.
+                // Lihat catatan di BottomIconMenu untuk alasan penambahan
+                // tombol ini — tap-di-luar-teks saja tidak cukup andal
+                // sebagai satu-satunya cara menutup overlay.
+                Log.d(TAG, "Aksi: tutup overlay (tombol ✕)");
+                closeOverlayAndStop();
+            }
         });
 
         int menuType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
@@ -359,19 +370,36 @@ public class OverlayCaptureService extends Service {
 
         // translationOverlayView ditambahkan setelah bottomMenu, jadi
         // secara z-order window baru ini berada DI ATAS bottomMenu dan
-        // akan menangkap semua sentuhan (termasuk di area ikon). Perlu
-        // diangkat ulang ke depan (remove lalu add kembali) supaya ikon
-        // tetap bisa dipencet untuk menutup overlay atau ganti aksi.
+        // akan menangkap semua sentuhan (termasuk di area ikon). Untuk
+        // mengembalikan bottomMenu ke depan TANPA pola remove+add yang
+        // rapuh (sempat menyebabkan overlay auto-dismiss atau malah
+        // tidak bisa ditutup sama sekali — lihat catatan lama di bawah),
+        // kita buat ulang instance bottomMenu dan pasang baru setelah
+        // translationOverlayView. Pembuatan ulang ini murah (LinearLayout
+        // ringan berisi 3 ikon) dan lebih dapat diprediksi dibanding
+        // memindah-mindah window yang sama saat sedang menerima input.
         //
-        // Ditunda ke frame berikutnya (post, bukan langsung di callback
-        // yang sama dengan addView di atas) — melakukan remove+add pada
-        // window LAIN tepat pada frame yang sama saat window baru pertama
-        // kali ditambahkan membuat WindowManager mengirim event sentuh
-        // "sisa" (mis. residu ACTION_UP dari tap ikon translate yang
-        // memicu proses ini) ke window yang baru saja dibuat, sebelum
-        // window itu sempat menggambar frame pertamanya — akibatnya
-        // overlay terjemahan langsung tertutup lagi begitu muncul.
-        mainHandler.post(this::bringBottomMenuToFront);
+        // Tombol ✕ di BottomIconMenu adalah jalan keluar yang SELALU
+        // berfungsi apapun kondisi z-order-nya, jadi walau ada race
+        // condition kecil di sini, overlay tidak akan pernah benar-benar
+        // tidak bisa ditutup lagi.
+        recreateBottomMenuOnTop();
+    }
+
+    /**
+     * Hapus bottomMenu lama (bila ada) dan buat instance baru, ditambahkan
+     * SETELAH semua overlay lain sehingga selalu berada di z-order paling
+     * depan dan tombol-tombolnya (termasuk ✕) selalu bisa disentuh.
+     */
+    private void recreateBottomMenuOnTop() {
+        if (bottomMenu != null) {
+            try {
+                windowManager.removeView(bottomMenu);
+            } catch (Exception ignored) {
+            }
+            bottomMenu = null;
+        }
+        showBottomMenu();
     }
 
     /** Bersihkan overlay hasil terjemahan sebelumnya (bila ada) sebelum memproses ulang. */
@@ -384,29 +412,41 @@ public class OverlayCaptureService extends Service {
         translationOverlayView = null;
     }
 
-    private void bringBottomMenuToFront() {
-        if (bottomMenu == null) return;
-        try {
-            windowManager.removeView(bottomMenu);
-            WindowManager.LayoutParams menuParams = (WindowManager.LayoutParams) bottomMenu.getLayoutParams();
-            windowManager.addView(bottomMenu, menuParams);
-        } catch (Exception e) {
-            Log.e(TAG, "Gagal mengangkat menu bawah ke depan", e);
-        }
-    }
-
     private float dp(float value) {
         return value * getResources().getDisplayMetrics().density;
     }
 
+    // Mencegah closeOverlayAndStop() dijalankan dobel (mis. tombol ✕
+    // ditekan bersamaan dengan animasi dismiss dari tap-di-luar-teks
+    // yang sedang berjalan) — bukan untuk mencegah cleanup, tapi supaya
+    // stopSelf() dan log tidak terpanggil berulang. Cleanup window itu
+    // sendiri tetap aman dipanggil berkali-kali karena tiap langkah
+    // sudah null-check + try-catch independen.
+    private boolean closing = false;
+
+    /**
+     * Tutup SEMUA window overlay yang mungkin sedang tampil, lalu hentikan
+     * service. Dipanggil dari banyak jalur (tombol ✕, tap-di-luar-teks,
+     * seleksi dibatalkan, OCR gagal/kosong, dst.) — harus selalu berhasil
+     * membersihkan window walau salah satu langkah gagal, supaya overlay
+     * TIDAK PERNAH tersisa menempel di layar sampai user harus force-stop
+     * aplikasi secara manual. Setiap removeView dibungkus try-catch
+     * TERPISAH: kegagalan menghapus satu window tidak boleh menghalangi
+     * window lain untuk tetap dicoba dihapus.
+     */
     private void closeOverlayAndStop() {
         mainHandler.post(() -> {
+            if (closing) return;
+            closing = true;
+
             try {
                 if (translationOverlayView != null) {
                     windowManager.removeView(translationOverlayView);
                     translationOverlayView = null;
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                Log.e(TAG, "Gagal remove translationOverlayView", e);
+                translationOverlayView = null;
             }
             try {
                 if (selectionView != null) {
@@ -414,14 +454,18 @@ public class OverlayCaptureService extends Service {
                     windowManager.removeView(selectionView);
                     selectionView = null;
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                Log.e(TAG, "Gagal remove selectionView", e);
+                selectionView = null;
             }
             try {
                 if (bottomMenu != null) {
                     windowManager.removeView(bottomMenu);
                     bottomMenu = null;
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                Log.e(TAG, "Gagal remove bottomMenu", e);
+                bottomMenu = null;
             }
             stopSelf();
         });
@@ -456,6 +500,37 @@ public class OverlayCaptureService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+
+        // Jaring pengaman terakhir: kalau service ini berhenti lewat
+        // jalur manapun (dibunuh sistem, exception tak tertangani, atau
+        // stopSelf() terpanggil sebelum closeOverlayAndStop() sempat
+        // membersihkan window-nya sendiri), pastikan TIDAK ADA window
+        // overlay yang tersisa menempel di layar. Sebelumnya ada celah
+        // di mana window overlay bisa tetap menempel di atas semua app
+        // lain sampai user terpaksa force-stop aplikasi secara manual.
+        try {
+            if (translationOverlayView != null) {
+                windowManager.removeView(translationOverlayView);
+                translationOverlayView = null;
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            if (selectionView != null) {
+                selectionView.destroy();
+                windowManager.removeView(selectionView);
+                selectionView = null;
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            if (bottomMenu != null) {
+                windowManager.removeView(bottomMenu);
+                bottomMenu = null;
+            }
+        } catch (Exception ignored) {
+        }
+
         if (fullScreenshot != null && !fullScreenshot.isRecycled()) {
             fullScreenshot.recycle();
         }
