@@ -502,8 +502,10 @@ public class OverlayCaptureService extends Service {
 
         OcrTranslateHelper.recognizeAndTranslate(bitmap, new OcrTranslateHelper.ResultCallback() {
             @Override
-            public void onModelDownloading() {
-                mainHandler.post(() -> showLoadingStatus(true, "Mengunduh bahasa…"));
+            public void onModelNotDownloaded(String sourceLanguageCode) {
+                mainHandler.post(() -> Toast.makeText(OverlayCaptureService.this,
+                        "Model bahasa belum diunduh. Buka menu aplikasi untuk mengunduh model.",
+                        Toast.LENGTH_LONG).show());
             }
 
             @Override

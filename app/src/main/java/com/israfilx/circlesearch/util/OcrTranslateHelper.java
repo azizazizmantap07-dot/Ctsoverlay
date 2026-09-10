@@ -4,10 +4,14 @@ import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.util.Log;
 
+import com.google.android.gms.tasks.Task;
+import com.google.android.gms.tasks.Tasks;
 import com.google.mlkit.common.model.DownloadConditions;
+import com.google.mlkit.common.model.RemoteModelManager;
 import com.google.mlkit.nl.languageid.LanguageIdentification;
 import com.google.mlkit.nl.languageid.LanguageIdentifier;
 import com.google.mlkit.nl.translate.TranslateLanguage;
+import com.google.mlkit.nl.translate.TranslateRemoteModel;
 import com.google.mlkit.nl.translate.Translation;
 import com.google.mlkit.nl.translate.Translator;
 import com.google.mlkit.nl.translate.TranslatorOptions;
@@ -18,7 +22,11 @@ import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -47,48 +55,73 @@ import java.util.concurrent.atomic.AtomicLong;
  * per pasangan bahasa (butuh internet saat unduh pertama kali saja,
  * setelahnya tersimpan dan bekerja offline).
  *
+ * PERUBAHAN PENTING — unduhan model bahasa sekarang MANUAL saja:
+ * Model tidak lagi diunduh otomatis saat translate. Jika model untuk
+ * pasangan bahasa yang dibutuhkan belum tersedia, translate dilewati
+ * dan teks asli ditampilkan. Pengguna harus mengunduh model terlebih
+ * dahulu lewat menu di MainActivity (bisa unduh satu per satu atau
+ * semua bahasa yang didukung sekaligus).
+ *
  * CATATAN PERBAIKAN — race condition unduh model bahasa:
- * Sebelumnya, bila translate dipicu lagi (mis. user menutup lalu memicu
- * ulang overlay) SEMENTARA unduhan model dari request SEBELUMNYA masih
- * berjalan, kedua alur async berjalan berdampingan tanpa saling kenal.
- * Begitu unduhan lama akhirnya selesai, callback-nya tetap terpanggil dan
- * bisa menampilkan hasil terjemahan yang sudah basi/tidak relevan lagi ke
- * layar (terlihat seperti "overlay nyangkut/tiba-tiba muncul"). Perbaikan:
- * setiap pemanggilan {@link #recognizeAndTranslate} mendapat nomor
+ * Setiap pemanggilan {@link #recognizeAndTranslate} mendapat nomor
  * "generasi" unik; hasil hanya dikirim ke callback bila generasi tsb
- * MASIH generasi terbaru saat callback siap. Selain itu callback
- * {@link ResultCallback#onModelDownloading()} ditambahkan supaya
- * pemanggil bisa menampilkan indikator loading yang jelas selama unduhan
- * berlangsung, alih-alih layar terlihat diam/stuck tanpa umpan balik.
+ * MASIH generasi terbaru saat callback siap.
  */
 public final class OcrTranslateHelper {
 
     private static final String TAG = "CircleSearch/OcrTranslate";
 
     /** Bahasa target translate — Indonesia, sesuai bahasa aplikasi. */
-    private static final String TARGET_LANGUAGE = TranslateLanguage.INDONESIAN;
+    public static final String TARGET_LANGUAGE = TranslateLanguage.INDONESIAN;
+
+    /**
+     * Daftar bahasa sumber yang didukung untuk diunduh manual.
+     * Model Translate ML Kit bersifat per-bahasa (bukan per-pasangan);
+     * model bahasa X + model bahasa target (Indonesia) memungkinkan
+     * terjemahan X → Indonesia.
+     */
+    public static final List<LanguageInfo> SUPPORTED_SOURCE_LANGUAGES = Collections.unmodifiableList(Arrays.asList(
+            new LanguageInfo(TranslateLanguage.ENGLISH, "English (Inggris)"),
+            new LanguageInfo(TranslateLanguage.CHINESE, "Chinese (Mandarin)"),
+            new LanguageInfo(TranslateLanguage.JAPANESE, "Japanese (Jepang)"),
+            new LanguageInfo(TranslateLanguage.KOREAN, "Korean (Korea)"),
+            new LanguageInfo(TranslateLanguage.ARABIC, "Arabic (Arab)"),
+            new LanguageInfo(TranslateLanguage.SPANISH, "Spanish (Spanyol)"),
+            new LanguageInfo(TranslateLanguage.FRENCH, "French (Prancis)"),
+            new LanguageInfo(TranslateLanguage.GERMAN, "German (Jerman)"),
+            new LanguageInfo(TranslateLanguage.PORTUGUESE, "Portuguese (Portugis)"),
+            new LanguageInfo(TranslateLanguage.RUSSIAN, "Russian (Rusia)"),
+            new LanguageInfo(TranslateLanguage.THAI, "Thai (Thailand)"),
+            new LanguageInfo(TranslateLanguage.VIETNAMESE, "Vietnamese (Vietnam)"),
+            new LanguageInfo(TranslateLanguage.HINDI, "Hindi"),
+            new LanguageInfo(TranslateLanguage.TURKISH, "Turkish (Turki)"),
+            new LanguageInfo(TranslateLanguage.ITALIAN, "Italian (Italia)"),
+            new LanguageInfo(TranslateLanguage.DUTCH, "Dutch (Belanda)"),
+            new LanguageInfo(TranslateLanguage.POLISH, "Polish (Polandia)"),
+            new LanguageInfo(TranslateLanguage.UKRAINIAN, "Ukrainian (Ukraina)"),
+            new LanguageInfo(TranslateLanguage.MALAY, "Malay (Melayu)"),
+            new LanguageInfo(TranslateLanguage.TAGALOG, "Filipino / Tagalog")
+    ));
 
     /**
      * Blok OCR dengan tinggi kotak di bawah ini (dalam px bitmap sumber)
-     * diabaikan saat membangun teks gabungan untuk DETEKSI BAHASA (tetap
-     * ikut di-translate bila lolos tahap lain) — blok sangat kecil pada
-     * screenshot 1-layar penuh biasanya berasal dari elemen UI ramai
-     * (jam, ikon status, label tombol pendek) yang sering salah terbaca
-     * atau bercampur bahasa, dan bila ikut digabung dapat membuat
-     * identifier bahasa salah simpul (mis. terbaca "und"/tak dikenal atau
-     * malah dianggap sudah bahasa target) sehingga SELURUH hasil gagal
-     * diterjemahkan. Ini adalah penyebab utama mode "1 layar" terasa
-     * kurang akurat dibanding mode lasso (yang areanya sudah dipilih
-     * user sehingga nyaris tidak ada noise UI ikut terbaca).
+     * diabaikan saat membangun teks gabungan untuk DETEKSI BAHASA.
      */
     private static final int MIN_BLOCK_HEIGHT_PX_FOR_LANG_DETECT = 18;
     /** Blok dengan teks lebih pendek dari ini (setelah trim) juga dianggap noise untuk deteksi bahasa. */
     private static final int MIN_BLOCK_CHARS_FOR_LANG_DETECT = 2;
 
-    // Penomor generasi request — dipakai untuk membuang hasil "basi" dari
-    // request lama yang masih berjalan (biasanya sedang menunggu unduhan
-    // model bahasa) saat request baru sudah dimulai.
     private static final AtomicLong requestGeneration = new AtomicLong(0);
+
+    public static class LanguageInfo {
+        public final String code;
+        public final String displayName;
+
+        public LanguageInfo(String code, String displayName) {
+            this.code = code;
+            this.displayName = displayName;
+        }
+    }
 
     /**
      * Satu blok teks hasil OCR: teks asli, teks terjemahan, dan posisinya
@@ -113,27 +146,23 @@ public final class OcrTranslateHelper {
     }
 
     public interface ResultCallback {
-        /**
-         * @param blocks daftar blok teks (dalam urutan pembacaan ML Kit),
-         *               masing-masing dengan teks asli + terjemahan + posisi
-         */
         void onSuccess(List<TranslatedBlock> blocks);
-
         void onNoTextFound();
-
         void onError(Exception e);
 
         /**
-         * Dipanggil sekali bila proses ini perlu mengunduh model bahasa
-         * dulu (belum pernah diunduh sebelumnya untuk pasangan bahasa
-         * ini) SEBELUM translate bisa dimulai. Pemanggil disarankan
-         * menampilkan indikator loading yang jelas ("Mengunduh bahasa…")
-         * selama rentang ini, supaya user tidak mengira overlay macet.
-         * Default kosong (no-op) via metode statis {@link ResultCallback#noopDownloading()}
-         * tidak disediakan — implementasikan langsung di pemanggil.
+         * Dipanggil bila model bahasa yang dibutuhkan belum diunduh.
+         * Translate dilewati; teks asli akan ditampilkan.
+         * Default: no-op.
          */
-        default void onModelDownloading() {
+        default void onModelNotDownloaded(String sourceLanguageCode) {
         }
+    }
+
+    public interface ModelCallback {
+        void onSuccess();
+        void onFailure(Exception e);
+        default void onProgress(String message) {}
     }
 
     private OcrTranslateHelper() {}
@@ -145,11 +174,7 @@ public final class OcrTranslateHelper {
 
     /**
      * Jalankan OCR SAJA tanpa translate sama sekali — dipakai untuk fitur
-     * "Salin Teks" di mana user hanya butuh teks apa adanya dari gambar,
-     * tanpa perlu menunggu/menerjemahkan (dan tanpa perlu unduh model
-     * bahasa apapun). Blok yang dikembalikan punya originalText ==
-     * translatedText (sama persis), sehingga tetap kompatibel dipakai
-     * oleh kode yang mengharapkan {@link TranslatedBlock}.
+     * "Salin Teks".
      */
     public static void recognizeTextOnly(Bitmap bitmap, ResultCallback callback) {
         recognizeInternal(bitmap, callback, false);
@@ -192,11 +217,6 @@ public final class OcrTranslateHelper {
 
     private static void detectLanguageAndTranslateBlocks(
             List<Text.TextBlock> textBlocks, ResultCallback callback, long generation) {
-        // Gabungkan hanya blok yang "signifikan" (lihat filterSignificantBlocks)
-        // untuk deteksi bahasa — blok noise (sangat kecil/sangat pendek,
-        // umum pada elemen UI ramai di mode 1-layar) dibuang dari teks
-        // gabungan supaya tidak mengacaukan hasil deteksi, meski blok
-        // tersebut tetap ikut ditranslate nanti bila lolos tahap translate.
         List<Text.TextBlock> significantForDetection = filterSignificantBlocks(textBlocks);
         List<Text.TextBlock> blocksForLangDetect =
                 significantForDetection.isEmpty() ? textBlocks : significantForDetection;
@@ -213,13 +233,11 @@ public final class OcrTranslateHelper {
                     Log.d(TAG, "Bahasa terdeteksi: " + languageCode);
 
                     if ("und".equals(languageCode) || TARGET_LANGUAGE.equals(languageCode)) {
-                        // Bahasa tidak terdeteksi, atau sudah dalam bahasa
-                        // target — tampilkan blok apa adanya tanpa translate.
                         callback.onSuccess(toUntranslatedBlocks(textBlocks));
                         return;
                     }
 
-                    translateBlocks(textBlocks, languageCode, callback, generation);
+                    translateBlocksIfModelAvailable(textBlocks, languageCode, callback, generation);
                 })
                 .addOnFailureListener(e -> {
                     if (!isCurrent(generation)) return;
@@ -228,14 +246,6 @@ public final class OcrTranslateHelper {
                 });
     }
 
-    /**
-     * Saring blok yang cukup "besar"/"panjang" untuk dipakai sebagai
-     * dasar deteksi bahasa — buang blok mini (ikon status, angka jam,
-     * dsb.) yang lebih mungkin noise daripada representasi bahasa asli
-     * konten. Tidak mempengaruhi blok mana yang akhirnya ditranslate;
-     * hanya mempengaruhi teks gabungan yang dipakai untuk identifikasi
-     * bahasa.
-     */
     private static List<Text.TextBlock> filterSignificantBlocks(List<Text.TextBlock> textBlocks) {
         List<Text.TextBlock> result = new ArrayList<>();
         for (Text.TextBlock block : textBlocks) {
@@ -260,62 +270,53 @@ public final class OcrTranslateHelper {
         return result;
     }
 
-    private static void translateBlocks(
-            List<Text.TextBlock> textBlocks, String sourceLanguageCode, ResultCallback callback, long generation) {
+    /**
+     * Translate HANYA jika model sudah tersedia secara lokal.
+     * Tidak ada unduhan otomatis — jika model belum diunduh, teks asli
+     * ditampilkan dan {@link ResultCallback#onModelNotDownloaded} dipanggil.
+     */
+    private static void translateBlocksIfModelAvailable(
+            List<Text.TextBlock> textBlocks, String sourceLanguageCode,
+            ResultCallback callback, long generation) {
+
+        isModelDownloaded(sourceLanguageCode, new ModelCallback() {
+            @Override
+            public void onSuccess() {
+                // Model tersedia → lanjut translate
+                if (!isCurrent(generation)) return;
+                doTranslateBlocks(textBlocks, sourceLanguageCode, callback, generation);
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                // Model belum diunduh atau gagal cek → tampilkan teks asli
+                if (!isCurrent(generation)) return;
+                Log.w(TAG, "Model bahasa " + sourceLanguageCode + " belum diunduh, tampilkan teks asli");
+                callback.onModelNotDownloaded(sourceLanguageCode);
+                callback.onSuccess(toUntranslatedBlocks(textBlocks));
+            }
+        });
+    }
+
+    private static void doTranslateBlocks(
+            List<Text.TextBlock> textBlocks, String sourceLanguageCode,
+            ResultCallback callback, long generation) {
+
         TranslatorOptions options = new TranslatorOptions.Builder()
                 .setSourceLanguage(sourceLanguageCode)
                 .setTargetLanguage(TARGET_LANGUAGE)
                 .build();
         Translator translator = Translation.getClient(options);
 
-        DownloadConditions downloadConditions = new DownloadConditions.Builder()
-                .build();
-
-        // Beri tahu pemanggil BEGITU kita tahu proses translate akan
-        // dimulai (mencakup kemungkinan unduh model) — UI dapat langsung
-        // menampilkan indikator loading sejak titik ini, bukan menunggu
-        // diam tanpa umpan balik sampai unduhan (yang bisa perlu beberapa
-        // detik pada koneksi lambat) selesai.
-        if (isCurrent(generation)) {
-            callback.onModelDownloading();
-        }
-
-        translator.downloadModelIfNeeded(downloadConditions)
-                .addOnSuccessListener(unused -> {
-                    if (!isCurrent(generation)) {
-                        // Request ini sudah digantikan oleh request yang
-                        // lebih baru (mis. user menutup lalu memicu ulang
-                        // overlay) SEMENTARA unduhan model masih berjalan.
-                        // Buang hasilnya — jangan sampai layar terjemahan
-                        // basi tiba-tiba muncul menimpa overlay yang
-                        // sedang aktif sekarang.
-                        Log.d(TAG, "Unduhan model selesai tapi request sudah basi (generation=" + generation + "), diabaikan");
-                        translator.close();
-                        return;
-                    }
-                    translateEachBlock(translator, textBlocks, callback, generation);
-                })
-                .addOnFailureListener(e -> {
-                    if (!isCurrent(generation)) {
-                        translator.close();
-                        return;
-                    }
-                    // Kemungkinan besar tidak ada internet untuk unduh model
-                    // bahasa. Tampilkan blok OCR apa adanya sebagai fallback.
-                    Log.e(TAG, "Gagal unduh model translate (cek koneksi internet), tampilkan blok OCR apa adanya", e);
-                    callback.onSuccess(toUntranslatedBlocks(textBlocks));
-                    translator.close();
-                });
+        // Tidak memanggil downloadModelIfNeeded — model harus sudah ada.
+        // Kita langsung translate; bila model benar-benar tidak ada,
+        // translate akan gagal dan kita fallback ke teks asli.
+        translateEachBlock(translator, textBlocks, callback, generation);
     }
 
-    /**
-     * Translate tiap blok satu per satu (paralel, ditunggu semua selesai)
-     * supaya tiap blok tetap dapat konteks kalimatnya sendiri yang utuh,
-     * lalu dipasangkan kembali dengan boundingBox masing-masing untuk
-     * keperluan overlay menimpa teks asli.
-     */
     private static void translateEachBlock(
-            Translator translator, List<Text.TextBlock> textBlocks, ResultCallback callback, long generation) {
+            Translator translator, List<Text.TextBlock> textBlocks,
+            ResultCallback callback, long generation) {
         List<Text.TextBlock> validBlocks = new ArrayList<>();
         for (Text.TextBlock block : textBlocks) {
             if (block.getBoundingBox() != null && !block.getText().trim().isEmpty()) {
@@ -356,7 +357,8 @@ public final class OcrTranslateHelper {
     }
 
     private static void finishTranslateEachBlock(
-            Translator translator, TranslatedBlock[] results, ResultCallback callback, long generation) {
+            Translator translator, TranslatedBlock[] results,
+            ResultCallback callback, long generation) {
         translator.close();
         if (!isCurrent(generation)) {
             Log.d(TAG, "Translate per-blok selesai tapi request sudah basi (generation=" + generation + "), diabaikan");
@@ -368,5 +370,152 @@ public final class OcrTranslateHelper {
         }
         Log.d(TAG, "Translate per-blok selesai, jumlah blok=" + list.size());
         callback.onSuccess(list);
+    }
+
+    // -------------------------------------------------------------------------
+    // Manajemen model bahasa (manual download / cek status / hapus)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Cek apakah model untuk bahasa tertentu sudah diunduh.
+     * Target (Indonesia) juga dicek — keduanya diperlukan.
+     */
+    public static void isModelDownloaded(String languageCode, ModelCallback callback) {
+        RemoteModelManager manager = RemoteModelManager.getInstance();
+        TranslateRemoteModel model = new TranslateRemoteModel.Builder(languageCode).build();
+        TranslateRemoteModel targetModel = new TranslateRemoteModel.Builder(TARGET_LANGUAGE).build();
+
+        Task<Boolean> sourceTask = manager.isModelDownloaded(model);
+        Task<Boolean> targetTask = manager.isModelDownloaded(targetModel);
+
+        Tasks.whenAll(sourceTask, targetTask)
+                .addOnSuccessListener(unused -> {
+                    boolean sourceOk = Boolean.TRUE.equals(sourceTask.getResult());
+                    boolean targetOk = Boolean.TRUE.equals(targetTask.getResult());
+                    if (sourceOk && targetOk) {
+                        callback.onSuccess();
+                    } else {
+                        callback.onFailure(new Exception("Model belum diunduh (source=" + sourceOk + ", target=" + targetOk + ")"));
+                    }
+                })
+                .addOnFailureListener(callback::onFailure);
+    }
+
+    /**
+     * Unduh model untuk satu bahasa sumber + model target (Indonesia)
+     * jika belum tersedia.
+     */
+    public static void downloadModel(String languageCode, ModelCallback callback) {
+        RemoteModelManager manager = RemoteModelManager.getInstance();
+        DownloadConditions conditions = new DownloadConditions.Builder().build();
+
+        TranslateRemoteModel sourceModel = new TranslateRemoteModel.Builder(languageCode).build();
+        TranslateRemoteModel targetModel = new TranslateRemoteModel.Builder(TARGET_LANGUAGE).build();
+
+        callback.onProgress("Mengunduh model " + languageCode + "…");
+
+        // Unduh source dulu, lalu target (bila perlu)
+        manager.download(sourceModel, conditions)
+                .addOnSuccessListener(unused -> {
+                    callback.onProgress("Mengunduh model target (Indonesia)…");
+                    manager.download(targetModel, conditions)
+                            .addOnSuccessListener(u2 -> callback.onSuccess())
+                            .addOnFailureListener(callback::onFailure);
+                })
+                .addOnFailureListener(callback::onFailure);
+    }
+
+    /**
+     * Unduh SEMUA bahasa yang didukung secara berurutan.
+     * Progress dilaporkan lewat {@link ModelCallback#onProgress}.
+     */
+    public static void downloadAllModels(ModelCallback callback) {
+        List<LanguageInfo> list = SUPPORTED_SOURCE_LANGUAGES;
+        downloadNext(list, 0, callback);
+    }
+
+    private static void downloadNext(List<LanguageInfo> list, int index, ModelCallback callback) {
+        if (index >= list.size()) {
+            // Pastikan model target juga ada
+            downloadModel(TARGET_LANGUAGE, new ModelCallback() {
+                @Override
+                public void onSuccess() {
+                    callback.onSuccess();
+                }
+                @Override
+                public void onFailure(Exception e) {
+                    // Target mungkin sudah ada; anggap sukses jika hanya ini yang gagal
+                    callback.onSuccess();
+                }
+            });
+            return;
+        }
+
+        LanguageInfo info = list.get(index);
+        callback.onProgress("Mengunduh " + info.displayName + " (" + (index + 1) + "/" + list.size() + ")…");
+
+        isModelDownloaded(info.code, new ModelCallback() {
+            @Override
+            public void onSuccess() {
+                // Sudah ada, lanjut berikutnya
+                downloadNext(list, index + 1, callback);
+            }
+            @Override
+            public void onFailure(Exception e) {
+                downloadModel(info.code, new ModelCallback() {
+                    @Override
+                    public void onSuccess() {
+                        downloadNext(list, index + 1, callback);
+                    }
+                    @Override
+                    public void onFailure(Exception e2) {
+                        Log.e(TAG, "Gagal unduh model " + info.code, e2);
+                        // Lanjut ke bahasa berikutnya meski gagal
+                        downloadNext(list, index + 1, callback);
+                    }
+                    @Override
+                    public void onProgress(String message) {
+                        callback.onProgress(message);
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * Ambil daftar kode bahasa yang sudah diunduh.
+     */
+    public static void getDownloadedLanguageCodes(ModelCallbackWithList callback) {
+        RemoteModelManager manager = RemoteModelManager.getInstance();
+        manager.getDownloadedModels(TranslateRemoteModel.class)
+                .addOnSuccessListener(models -> {
+                    Set<String> codes = new HashSet<>();
+                    for (TranslateRemoteModel m : models) {
+                        codes.add(m.getLanguage());
+                    }
+                    callback.onSuccess(new ArrayList<>(codes));
+                })
+                .addOnFailureListener(callback::onFailure);
+    }
+
+    public interface ModelCallbackWithList {
+        void onSuccess(List<String> languageCodes);
+        void onFailure(Exception e);
+    }
+
+    /**
+     * Hapus model bahasa tertentu (opsional, untuk menghemat ruang).
+     */
+    public static void deleteModel(String languageCode, ModelCallback callback) {
+        if (TARGET_LANGUAGE.equals(languageCode)) {
+            // Jangan hapus model target — dibutuhkan untuk semua terjemahan
+            callback.onFailure(new Exception("Model bahasa target (Indonesia) tidak boleh dihapus"));
+            return;
+        }
+        RemoteModelManager manager = RemoteModelManager.getInstance();
+        TranslateRemoteModel model = new TranslateRemoteModel.Builder(languageCode).build();
+        manager.deleteDownloadedModel(model)
+                .addOnSuccessListener(unused -> callback.onSuccess())
+                .addOnFailureListener(callback::onFailure);
     }
 }
