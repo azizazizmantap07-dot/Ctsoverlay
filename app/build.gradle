@@ -10,8 +10,8 @@ android {
         applicationId "com.israfilx.circlesearch"
         minSdk 26
         targetSdk 34
-        versionCode 9
-        versionName "1.6.0"
+        versionCode 10
+        versionName "1.6.1"
     }
 
     // Dibaca dari properti -P yang diinjeksikan workflow build-release.yml
@@ -40,6 +40,18 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
+
+    // Native lib tidak dikompres agar ELF alignment 16 KB bisa dihormati
+    // oleh loader (persyaratan perangkat Android 15+ dengan page size 16 KB).
+    // Peringatan popup "tidak kompatibel 16 KB" pada APK debug tetap bisa
+    // muncul karena library ML Kit Google belum semua 16KB-aligned —
+    // itu bug di sisi Google, bukan app. Build release + "Jangan Tampilkan
+    // Lagi" menekan dialog; OCR/translate tetap berfungsi.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
 }
 
 dependencies {
@@ -51,15 +63,15 @@ dependencies {
     // digabung ke dalam kotlin-stdlib itu sendiri sejak Kotlin 1.8 —
     // menyebabkan "Duplicate class" saat dexing. Exclude keduanya di
     // setiap modul ML Kit yang menariknya.
-    implementation('com.google.mlkit:text-recognition:16.0.0') {
+    implementation('com.google.mlkit:text-recognition:16.0.1') {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
     }
-    implementation('com.google.mlkit:language-id:17.0.5') {
+    implementation('com.google.mlkit:language-id:17.0.6') {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
     }
-    implementation('com.google.mlkit:translate:17.0.2') {
+    implementation('com.google.mlkit:translate:17.0.3') {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
     }

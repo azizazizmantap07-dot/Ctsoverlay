@@ -131,14 +131,81 @@ public class OverlayCaptureService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_START_CAPTURE.equals(intent.getAction())) {
+            // Reset state dari sesi sebelumnya agar trigger ke-2, ke-3, ...
+            // selalu bisa jalan tanpa force-stop app.
+            resetCaptureState();
+
             // Harus startForeground SEBELUM getMediaProjection (syarat Android 14+).
-            // Pilih type sesuai path: mediaProjection bila token sudah ada, else specialUse.
             boolean forProjection = intent.hasExtra(EXTRA_PROJECTION_RESULT_CODE)
                     && intent.hasExtra(EXTRA_PROJECTION_DATA);
             startForegroundWithType(forProjection);
             handleCaptureTrigger(intent);
         }
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Bersihkan window overlay + flag + bitmap lama dari sesi sebelumnya.
+     * Wajib dipanggil di awal setiap trigger baru supaya service yang masih
+     * hidup (belum onDestroy) bisa dipakai ulang dengan aman.
+     */
+    private void resetCaptureState() {
+        closing = false;
+        mainHandler.removeCallbacksAndMessages(null);
+
+        try {
+            if (loadingStatusView != null) {
+                windowManager.removeView(loadingStatusView);
+            }
+        } catch (Exception ignored) {
+        }
+        loadingStatusView = null;
+
+        try {
+            if (rainbowGlowView != null) {
+                rainbowGlowView.cleanup();
+                windowManager.removeView(rainbowGlowView);
+            }
+        } catch (Exception ignored) {
+        }
+        rainbowGlowView = null;
+
+        try {
+            if (translationOverlayView != null) {
+                windowManager.removeView(translationOverlayView);
+            }
+        } catch (Exception ignored) {
+        }
+        translationOverlayView = null;
+
+        try {
+            if (selectionView != null) {
+                selectionView.destroy();
+                windowManager.removeView(selectionView);
+            }
+        } catch (Exception ignored) {
+        }
+        selectionView = null;
+
+        try {
+            if (bottomMenu != null) {
+                windowManager.removeView(bottomMenu);
+            }
+        } catch (Exception ignored) {
+        }
+        bottomMenu = null;
+
+        if (fullScreenshot != null && !fullScreenshot.isRecycled()) {
+            fullScreenshot.recycle();
+        }
+        fullScreenshot = null;
+        if (currentCrop != null && !currentCrop.isRecycled()) {
+            currentCrop.recycle();
+        }
+        currentCrop = null;
+        currentBounds = null;
+
+        releaseProjectionResources();
     }
 
     private void startForegroundWithType(boolean mediaProjectionPath) {
@@ -1021,6 +1088,18 @@ public class OverlayCaptureService extends Service {
                 Log.e(TAG, "Gagal remove bottomMenu", e);
                 bottomMenu = null;
             }
+
+            if (fullScreenshot != null && !fullScreenshot.isRecycled()) {
+                fullScreenshot.recycle();
+            }
+            fullScreenshot = null;
+            if (currentCrop != null && !currentCrop.isRecycled()) {
+                currentCrop.recycle();
+            }
+            currentCrop = null;
+            currentBounds = null;
+
+            releaseProjectionResources();
             stopSelf();
         });
     }

@@ -54,7 +54,7 @@ public class MyVoiceInteractionSession extends VoiceInteractionSession {
                 Log.w(TAG, "onHandleScreenshot tidak datang — fallback tanpa bitmap sistem");
                 startCaptureService(null);
             }
-        }, 800);
+        }, 1500);
     }
 
     /**
