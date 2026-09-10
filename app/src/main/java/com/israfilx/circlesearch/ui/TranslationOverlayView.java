@@ -45,6 +45,16 @@ public class TranslationOverlayView extends View {
     private final List<TranslatedBlock> blocks;
     private OnDismissListener dismissListener;
 
+    // Waktu view ini terpasang ke window (diisi di onAttachedToWindow).
+    // Dipakai untuk mengabaikan MotionEvent yang datang dalam sesaat
+    // setelah overlay ini tampil — mencegah "residu" ACTION_UP dari
+    // tap ikon translate sebelumnya (yang memicu proses OCR async ini)
+    // langsung tertangkap sebagai tap-untuk-menutup begitu overlay
+    // baru saja ditambahkan ke WindowManager, yang membuat overlay
+    // terlihat muncul sekejap lalu hilang sendiri.
+    private long attachedAtMs = 0L;
+    private static final long DISMISS_GRACE_PERIOD_MS = 350L;
+
     private final Paint coverPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint blurCoverBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
@@ -67,6 +77,12 @@ public class TranslationOverlayView extends View {
 
     public void setOnDismissListener(OnDismissListener l) {
         this.dismissListener = l;
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        attachedAtMs = android.os.SystemClock.uptimeMillis();
     }
 
     private float dp(float value) {
@@ -105,7 +121,7 @@ public class TranslationOverlayView extends View {
         //    jauh lebih menyatu dibanding kotak warna polos saja.
         int avgColor = sampleAverageColor(box);
         drawCoverBase(canvas, coverRect, avgColor);
-        drawBlurredCover(canvas, box, coverRect);
+        drawBlurredCover(canvas, box, coverRect, avgColor);
 
         // 2. Gambar teks terjemahan di atas area yang sudah ditutup,
         //    warna kontras otomatis (putih/hitam) berdasar kecerahan
@@ -152,40 +168,73 @@ public class TranslationOverlayView extends View {
         canvas.drawRoundRect(coverRect, dp(CORNER_RADIUS_DP), dp(CORNER_RADIUS_DP), coverPaint);
     }
 
+    /** Berapa banyak "sel" mosaic yang ditarget di sisi terpanjang patch. Makin
+     *  besar nilainya, makin halus (kurang blocky) hasil blur-nya. Nilai lama
+     *  (downscale tetap /10) membuat blok teks kecil hanya tersisa 2-3px di sisi
+     *  pendek — itu menghasilkan kotak-kotak warna acak besar, bukan blur halus,
+     *  sehingga area itu malah lebih ramai/susah dipakai sebagai latar teks. */
+    private static final int TARGET_MOSAIC_CELLS = 18;
+
     /**
      * Lapis blur di atas cover dasar: gambar ulang potongan bitmap asli
-     * area itu, diperkecil drastis lalu diperbesar kembali (mosaic/box
-     * blur) sebelum digambar ke area penutup. Ini menyamarkan bentuk
-     * huruf teks asli sampai tidak terbaca, sementara warna & tekstur
-     * kasar di sekitarnya (background gradient, pola, dsb.) tetap
-     * terasa menyatu — bukan kotak warna rata polos.
+     * area itu, diperkecil lalu diperbesar kembali (mosaic/box blur)
+     * sebelum digambar ke area penutup, lalu diredupkan dengan overlay
+     * semi-transparan warna dasar (avgColor) di atasnya. Ini menyamarkan
+     * bentuk huruf teks asli sampai tidak terbaca dan meratakan kontras
+     * lokal supaya teks terjemahan di atasnya tetap mudah dibaca, sementara
+     * warna & tekstur kasar di sekitarnya (background gradient, pola, dsb.)
+     * tetap terasa menyatu — bukan kotak warna rata polos maupun mosaic
+     * kasar yang malah terlihat berantakan.
      *
      * Pakai downscale/upscale (bukan RenderEffect API 31+) supaya
      * perilakunya identik di semua versi Android dan tidak butuh
      * hardware layer terpisah untuk digambar langsung ke Canvas ini.
      */
-    private void drawBlurredCover(Canvas canvas, Rect box, RectF coverRect) {
+    private void drawBlurredCover(Canvas canvas, Rect box, RectF coverRect, int avgColor) {
         int left = Math.max(0, box.left);
         int top = Math.max(0, box.top);
         int right = Math.min(sourceBitmap.getWidth(), box.right);
         int bottom = Math.min(sourceBitmap.getHeight(), box.bottom);
         if (right <= left || bottom <= top) return;
 
+        Bitmap patch = null;
+        Bitmap small = null;
         try {
-            Bitmap patch = Bitmap.createBitmap(sourceBitmap, left, top, right - left, bottom - top);
-            int smallW = Math.max(1, patch.getWidth() / 10);
-            int smallH = Math.max(1, patch.getHeight() / 10);
-            Bitmap small = Bitmap.createScaledBitmap(patch, smallW, smallH, true);
+            int patchW = right - left;
+            int patchH = bottom - top;
+            patch = Bitmap.createBitmap(sourceBitmap, left, top, patchW, patchH);
+
+            // Skala downscale relatif terhadap ukuran patch (bukan pembagi
+            // tetap) supaya blok teks kecil tidak berakhir dengan sisa 1-3px
+            // (yang membuat mosaic terlihat sebagai kotak-kotak acak besar,
+            // bukan blur). Sisi terpanjang ditarget ~TARGET_MOSAIC_CELLS sel.
+            int longSide = Math.max(patchW, patchH);
+            float scale = TARGET_MOSAIC_CELLS / (float) longSide;
+            int smallW = Math.max(1, Math.round(patchW * scale));
+            int smallH = Math.max(1, Math.round(patchH * scale));
+            small = Bitmap.createScaledBitmap(patch, smallW, smallH, true);
+
             canvas.drawRoundRect(coverRect, dp(CORNER_RADIUS_DP), dp(CORNER_RADIUS_DP), coverPaint);
             int saveCount = canvas.save();
             canvas.clipRect(coverRect);
             canvas.drawBitmap(small, null, coverRect, blurCoverBitmapPaint);
+
+            // Redupkan hasil mosaic dengan overlay semi-transparan warna
+            // dasar: meratakan kontras sisa (highlight/shadow huruf asli
+            // yang masih samar-samar kebentuk setelah blur) supaya tidak
+            // "mengganggu" teks terjemahan yang digambar di atasnya nanti.
+            coverPaint.setColor(avgColor);
+            coverPaint.setAlpha(150);
+            canvas.drawRect(coverRect, coverPaint);
+            coverPaint.setAlpha(255);
+
             canvas.restoreToCount(saveCount);
-            small.recycle();
-            patch.recycle();
         } catch (Exception ignored) {
             // Kalau blur gagal karena alasan apapun, cover warna solid dari
             // drawCoverBase() di atas sudah cukup menutup teks asli.
+        } finally {
+            if (small != null) small.recycle();
+            if (patch != null) patch.recycle();
         }
     }
 
@@ -259,6 +308,14 @@ public class TranslationOverlayView extends View {
     @Override
     public boolean onTouchEvent(android.view.MotionEvent event) {
         if (event.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
+            long sinceAttach = android.os.SystemClock.uptimeMillis() - attachedAtMs;
+            if (sinceAttach < DISMISS_GRACE_PERIOD_MS) {
+                // Kemungkinan besar ini residu dari jari yang masih
+                // menyentuh layar sesaat setelah tap ikon translate
+                // (yang baru selesai diproses secara async) — abaikan,
+                // jangan langsung menutup overlay yang baru saja tampil.
+                return true;
+            }
             if (dismissListener != null) dismissListener.onDismiss();
         }
         return true;

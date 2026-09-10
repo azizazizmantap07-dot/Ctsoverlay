@@ -359,10 +359,19 @@ public class OverlayCaptureService extends Service {
 
         // translationOverlayView ditambahkan setelah bottomMenu, jadi
         // secara z-order window baru ini berada DI ATAS bottomMenu dan
-        // akan menangkap semua sentuhan (termasuk di area ikon). Angkat
-        // ulang bottomMenu ke depan (remove lalu add kembali) supaya
-        // ikon tetap bisa dipencet untuk menutup overlay atau ganti aksi.
-        bringBottomMenuToFront();
+        // akan menangkap semua sentuhan (termasuk di area ikon). Perlu
+        // diangkat ulang ke depan (remove lalu add kembali) supaya ikon
+        // tetap bisa dipencet untuk menutup overlay atau ganti aksi.
+        //
+        // Ditunda ke frame berikutnya (post, bukan langsung di callback
+        // yang sama dengan addView di atas) — melakukan remove+add pada
+        // window LAIN tepat pada frame yang sama saat window baru pertama
+        // kali ditambahkan membuat WindowManager mengirim event sentuh
+        // "sisa" (mis. residu ACTION_UP dari tap ikon translate yang
+        // memicu proses ini) ke window yang baru saja dibuat, sebelum
+        // window itu sempat menggambar frame pertamanya — akibatnya
+        // overlay terjemahan langsung tertutup lagi begitu muncul.
+        mainHandler.post(this::bringBottomMenuToFront);
     }
 
     /** Bersihkan overlay hasil terjemahan sebelumnya (bila ada) sebelum memproses ulang. */
