@@ -20,99 +20,81 @@ import android.view.animation.DecelerateInterpolator;
 import android.view.animation.LinearInterpolator;
 
 /**
- * View overlay yang menampilkan screenshot layar (beku) sebagai
- * background, lalu menangkap gesture jari user untuk menggambar
- * coretan bebas (freeform lasso) di atasnya — sama seperti cara kerja
- * Circle to Search Google.
- *
- * Stroke lasso memakai animasi RGB tiga warna (merah → kuning → hijau)
- * yang mengalir sepanjang path, plus soft glow di luarnya, supaya tali
- * seleksi terasa penuh warna dan hidup.
- *
- * Area gelap di luar coretan sedikit di-dim supaya area yang diseleksi
- * terlihat menonjol (efek spotlight), mengikuti bounding box path yang
- * sedang/sudah digambar.
- *
- * Setelah user mengangkat jari, {@link OnSelectionListener#onSelectionComplete}
- * dipanggil dengan bounding box (dalam koordinat bitmap asli) dari
- * area yang diseleksi, siap untuk di-crop oleh pemanggil.
+ * Overlay seleksi ala Circle to Search:
+ *  1. User menggambar lasso bebas (dengan stroke RGB mengalir).
+ *  2. Saat jari diangkat, path diubah otomatis menjadi bingkai
+ *     persegi/persegi panjang (bounding box) yang rapi.
+ *  3. Bingkai bisa diperbesar/diperkecil lewat 8 handle (4 sudut + 4
+ *     tengah sisi) dan digeser utuh dengan drag di dalam area.
+ *  4. Aksi Cari / Translate / Salin memakai crop persegi akhir.
  */
 public class SelectionOverlayView extends View {
 
     public interface OnSelectionListener {
-        /**
-         * @param bounds bounding box hasil seleksi, dalam koordinat
-         *               bitmap screenshot asli (bukan koordinat layar
-         *               view, meski umumnya sama karena overlay full-screen)
-         */
+        /** Dipanggil saat lasso selesai → masuk mode bingkai adjustable. */
         void onSelectionComplete(RectF bounds);
 
-        /** Dipanggil bila user tap sekali tanpa menggambar (dianggap batal). */
+        /** Dipanggil tiap kali user mengubah ukuran/posisi bingkai. */
+        void onSelectionBoundsChanged(RectF bounds);
+
         void onSelectionCancelled();
 
-        /**
-         * Dipanggil sekali begitu user mulai menggambar (gerakan jari
-         * pertama yang terdeteksi sebagai drag, bukan sekadar tap).
-         * Menu ikon bawah (BottomIconMenu) tetap ditampilkan apa adanya
-         * saat ini terjadi — posisinya sudah di bagian bawah layar
-         * sehingga tidak menghalangi area yang sedang diseleksi.
-         */
         void onSelectionStarted();
     }
+
+    private enum Mode { IDLE, DRAWING, ADJUST }
 
     private final Bitmap frozenScreenshot;
     private OnSelectionListener listener;
 
     private final Path lassoPath = new Path();
+    private final RectF selectionRect = new RectF();
     private final RectF pathBounds = new RectF();
 
     private final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint dimPaint = new Paint();
     private final Paint lassoFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-    // Stroke inti (tipis, warna RGB segmen) + glow luar (lebih tebal, alpha rendah)
     private final Paint segmentPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint framePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint frameFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint handleStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-    // PathMeasure + buffer segmen dipakai ulang tiap frame onDraw
     private final PathMeasure pathMeasure = new PathMeasure();
     private final Path segmentPath = new Path();
-    private final float[] pos = new float[2];
-    private final float[] tan = new float[2];
 
+    private Mode mode = Mode.IDLE;
     private float lastX, lastY;
     private boolean hasMoved = false;
 
-    /**
-     * Fase 0..1 untuk pergeseran warna sepanjang path.
-     * Dinaikkan terus oleh animator supaya gradasi RGB "berjalan".
-     */
+    // Handle drag state (ADJUST mode)
+    private int activeHandle = HANDLE_NONE; // -1 none, 0-7 handles, 8 = move body
+    private float touchOffsetX, touchOffsetY;
+
     private float colorPhase = 0f;
     private ValueAnimator rgbFlowAnimator;
 
-    // Tiga warna inti: merah → kuning → hijau (lalu kembali ke merah)
+    private static final int HANDLE_NONE = -1;
+    private static final int HANDLE_MOVE = 8;
+    // 0=TL 1=T 2=TR 3=R 4=BR 5=B 6=BL 7=L
     private static final int COLOR_RED    = 0xFFFF2D2D;
     private static final int COLOR_YELLOW = 0xFFFFD21E;
     private static final int COLOR_GREEN  = 0xFF32DC6E;
 
     private static final float MIN_DRAG_DISTANCE_PX = 24f;
+    private static final float MIN_RECT_SIZE_DP = 40f;
     private static final long FADE_OUT_DURATION_MS = 160L;
-
-    /** Panjang tiap segmen warna di path (dp). Semakin kecil = gradasi lebih halus. */
     private static final float SEGMENT_DP = 10f;
 
     public SelectionOverlayView(Context context, Bitmap frozenScreenshot) {
         super(context);
         this.frozenScreenshot = frozenScreenshot;
 
-        // Dim dibuat setransparan mungkin (alpha rendah) — cukup untuk
-        // memberi kesan "layar dibekukan/mode seleksi aktif" tanpa
-        // menggelapkan konten terlalu banyak, supaya user tetap bisa
-        // melihat detail asli layar dengan jelas di balik overlay.
         dimPaint.setColor(Color.argb(48, 0, 0, 0));
 
         lassoFillPaint.setStyle(Paint.Style.FILL);
-        lassoFillPaint.setColor(Color.argb(60, 255, 255, 255));
+        lassoFillPaint.setColor(Color.argb(50, 255, 255, 255));
 
         segmentPaint.setStyle(Paint.Style.STROKE);
         segmentPaint.setStrokeWidth(dp(3.2f));
@@ -124,22 +106,42 @@ public class SelectionOverlayView extends View {
         glowPaint.setStrokeJoin(Paint.Join.ROUND);
         glowPaint.setStrokeCap(Paint.Cap.ROUND);
 
+        framePaint.setStyle(Paint.Style.STROKE);
+        framePaint.setStrokeWidth(dp(2.5f));
+        framePaint.setColor(Color.WHITE);
+
+        frameFillPaint.setStyle(Paint.Style.FILL);
+        frameFillPaint.setColor(Color.argb(28, 255, 255, 255));
+
+        handlePaint.setStyle(Paint.Style.FILL);
+        handlePaint.setColor(Color.WHITE);
+
+        handleStrokePaint.setStyle(Paint.Style.STROKE);
+        handleStrokePaint.setStrokeWidth(dp(1.5f));
+        handleStrokePaint.setColor(Color.parseColor("#33FFFFFF"));
+
         setWillNotDraw(false);
         startRgbFlow();
 
-        // Animasi fade-in halus saat overlay seleksi pertama kali muncul
-        // (begitu screencap selesai) — supaya transisi dari layar app
-        // biasa ke tampilan "beku + dim" terasa smooth, bukan snap tiba-tiba.
         setAlpha(0f);
-        animate()
-                .alpha(1f)
-                .setDuration(180)
-                .setInterpolator(new DecelerateInterpolator())
-                .start();
+        animate().alpha(1f).setDuration(180).setInterpolator(new DecelerateInterpolator()).start();
     }
 
     public void setOnSelectionListener(OnSelectionListener l) {
         this.listener = l;
+    }
+
+    /** Bounds bingkai saat ini (mode ADJUST) atau path bounds. */
+    public RectF getSelectionBounds() {
+        if (mode == Mode.ADJUST && !selectionRect.isEmpty()) {
+            return new RectF(selectionRect);
+        }
+        return new RectF(pathBounds);
+    }
+
+    /** Path lasso asli (boleh kosong setelah masuk mode ADJUST). */
+    public Path getLassoPath() {
+        return lassoPath;
     }
 
     private float dp(float value) {
@@ -147,103 +149,125 @@ public class SelectionOverlayView extends View {
     }
 
     private void startRgbFlow() {
-        // 0 → 1 dalam ~1.2 detik, loop infinite — warna seolah mengalir
-        // sepanjang tali lasso.
         rgbFlowAnimator = ValueAnimator.ofFloat(0f, 1f);
         rgbFlowAnimator.setDuration(1200);
         rgbFlowAnimator.setRepeatCount(ValueAnimator.INFINITE);
         rgbFlowAnimator.setInterpolator(new LinearInterpolator());
         rgbFlowAnimator.addUpdateListener(anim -> {
             colorPhase = (float) anim.getAnimatedValue();
-            if (hasMoved) invalidate();
+            if (hasMoved || mode == Mode.ADJUST) invalidate();
         });
         rgbFlowAnimator.start();
     }
 
-    /**
-     * Interpolasi warna sepanjang siklus merah → kuning → hijau → merah.
-     * @param t nilai 0..1 (sudah dimodulo)
-     */
     private static int colorAt(float t) {
-        t = t - (float) Math.floor(t); // pastikan 0..1
-        if (t < 1f / 3f) {
-            return lerpColor(COLOR_RED, COLOR_YELLOW, t * 3f);
-        } else if (t < 2f / 3f) {
-            return lerpColor(COLOR_YELLOW, COLOR_GREEN, (t - 1f / 3f) * 3f);
-        } else {
-            return lerpColor(COLOR_GREEN, COLOR_RED, (t - 2f / 3f) * 3f);
-        }
+        t = t - (float) Math.floor(t);
+        if (t < 1f / 3f) return lerpColor(COLOR_RED, COLOR_YELLOW, t * 3f);
+        if (t < 2f / 3f) return lerpColor(COLOR_YELLOW, COLOR_GREEN, (t - 1f / 3f) * 3f);
+        return lerpColor(COLOR_GREEN, COLOR_RED, (t - 2f / 3f) * 3f);
     }
 
     private static int lerpColor(int a, int b, float f) {
         f = Math.max(0f, Math.min(1f, f));
         int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
         int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
-        int r = (int) (ar + (br - ar) * f);
-        int g = (int) (ag + (bg - ag) * f);
-        int bl = (int) (ab + (bb - ab) * f);
-        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+        return 0xFF000000
+                | ((int) (ar + (br - ar) * f) << 16)
+                | ((int) (ag + (bg - ag) * f) << 8)
+                | (int) (ab + (bb - ab) * f);
     }
 
-    /**
-     * Gambar path lasso sebagai rangkaian segmen pendek, masing-masing
-     * dengan warna RGB yang bergeser menurut posisi di path + colorPhase.
-     * Glow digambar dulu (di bawah), lalu stroke inti di atasnya.
-     */
-    private void drawRgbLasso(Canvas canvas) {
-        pathMeasure.setPath(lassoPath, false);
+    private void drawRgbPath(Canvas canvas, Path path) {
+        pathMeasure.setPath(path, false);
         float length = pathMeasure.getLength();
         if (length < 1f) return;
-
         float segmentLen = dp(SEGMENT_DP);
-        // Satu siklus warna penuh kira-kira sepanjang ~180dp path
         float cycleLen = dp(180f);
-
         for (float d = 0f; d < length; d += segmentLen) {
-            float end = Math.min(d + segmentLen + 1f, length); // +1 overlap anti-celah
+            float end = Math.min(d + segmentLen + 1f, length);
             segmentPath.reset();
             if (!pathMeasure.getSegment(d, end, segmentPath, true)) continue;
-
-            // Posisi relatif di path + fase animasi → warna
             float t = ((d / cycleLen) + colorPhase) % 1f;
             if (t < 0f) t += 1f;
             int color = colorAt(t);
-
-            // Glow luar (alpha rendah)
             glowPaint.setColor((color & 0x00FFFFFF) | 0x55000000);
             canvas.drawPath(segmentPath, glowPaint);
-
-            // Stroke inti solid
             segmentPaint.setColor(color);
             canvas.drawPath(segmentPath, segmentPaint);
         }
     }
 
+    /** Stroke RGB di sekeliling rect (untuk mode ADJUST). */
+    private void drawRgbRect(Canvas canvas, RectF r) {
+        Path rectPath = new Path();
+        float radius = dp(10);
+        rectPath.addRoundRect(r, radius, radius, Path.Direction.CW);
+        drawRgbPath(canvas, rectPath);
+    }
+
+    private void drawHandles(Canvas canvas, RectF r) {
+        float hs = dp(7); // handle radius
+        float[][] pts = handlePoints(r);
+        for (float[] p : pts) {
+            canvas.drawCircle(p[0], p[1], hs + dp(2), handleStrokePaint);
+            canvas.drawCircle(p[0], p[1], hs, handlePaint);
+        }
+    }
+
+    private float[][] handlePoints(RectF r) {
+        float cx = r.centerX();
+        float cy = r.centerY();
+        return new float[][]{
+                {r.left, r.top}, {cx, r.top}, {r.right, r.top},
+                {r.right, cy},
+                {r.right, r.bottom}, {cx, r.bottom}, {r.left, r.bottom},
+                {r.left, cy}
+        };
+    }
+
+    private int hitTestHandle(float x, float y) {
+        float touchR = dp(22);
+        float[][] pts = handlePoints(selectionRect);
+        for (int i = 0; i < pts.length; i++) {
+            float dx = x - pts[i][0];
+            float dy = y - pts[i][1];
+            if (dx * dx + dy * dy <= touchR * touchR) return i;
+        }
+        if (selectionRect.contains(x, y)) return HANDLE_MOVE;
+        return HANDLE_NONE;
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-
-        // 1. Gambar screenshot beku sebagai background, di-scale agar pas
-        //    dengan ukuran view (overlay full-screen, jadi umumnya 1:1).
         Rect dst = new Rect(0, 0, getWidth(), getHeight());
         canvas.drawBitmap(frozenScreenshot, null, dst, bitmapPaint);
-
-        // 2. Dim seluruh layar sedikit supaya area seleksi terasa menonjol.
         canvas.drawRect(dst, dimPaint);
 
-        // 3. Gambar coretan lasso + area terselect tidak di-dim (di-punch out).
-        if (hasMoved) {
-            // Punch-out: gambar ulang bitmap asli (tanpa dim) hanya di area
-            // yang sudah dilingkari, memakai path sebagai clip.
-            int saveCount = canvas.saveLayer(0, 0, getWidth(), getHeight(), null);
+        if (mode == Mode.DRAWING && hasMoved) {
+            // Punch-out + stroke lasso
+            int save = canvas.saveLayer(0, 0, getWidth(), getHeight(), null);
             canvas.drawPath(lassoPath, lassoFillPaint);
-            Paint clipPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            clipPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
-            canvas.drawBitmap(frozenScreenshot, null, dst, clipPaint);
-            canvas.restoreToCount(saveCount);
+            Paint clip = new Paint(Paint.ANTI_ALIAS_FLAG);
+            clip.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
+            canvas.drawBitmap(frozenScreenshot, null, dst, clip);
+            canvas.restoreToCount(save);
+            drawRgbPath(canvas, lassoPath);
+        } else if (mode == Mode.ADJUST && !selectionRect.isEmpty()) {
+            // Punch-out rectangular
+            int save = canvas.saveLayer(0, 0, getWidth(), getHeight(), null);
+            Path rr = new Path();
+            float radius = dp(10);
+            rr.addRoundRect(selectionRect, radius, radius, Path.Direction.CW);
+            canvas.drawPath(rr, lassoFillPaint);
+            Paint clip = new Paint(Paint.ANTI_ALIAS_FLAG);
+            clip.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
+            canvas.drawBitmap(frozenScreenshot, null, dst, clip);
+            canvas.restoreToCount(save);
 
-            // Stroke RGB mengalir sepanjang path
-            drawRgbLasso(canvas);
+            canvas.drawRoundRect(selectionRect, radius, radius, frameFillPaint);
+            drawRgbRect(canvas, selectionRect);
+            drawHandles(canvas, selectionRect);
         }
     }
 
@@ -252,11 +276,17 @@ public class SelectionOverlayView extends View {
         float x = event.getX();
         float y = event.getY();
 
+        if (mode == Mode.ADJUST) {
+            return handleAdjustTouch(event, x, y);
+        }
+
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 lassoPath.reset();
                 pathBounds.setEmpty();
+                selectionRect.setEmpty();
                 hasMoved = false;
+                mode = Mode.DRAWING;
                 lassoPath.moveTo(x, y);
                 lastX = x;
                 lastY = y;
@@ -266,15 +296,12 @@ public class SelectionOverlayView extends View {
                 float dx = Math.abs(x - lastX);
                 float dy = Math.abs(y - lastY);
                 if (dx >= 3 || dy >= 3) {
-                    // Quad-to untuk kurva yang lebih halus mengikuti jari
                     lassoPath.quadTo(lastX, lastY, (x + lastX) / 2, (y + lastY) / 2);
                     lastX = x;
                     lastY = y;
-                    boolean wasFirstMove = !hasMoved;
+                    boolean first = !hasMoved;
                     hasMoved = true;
-                    if (wasFirstMove && listener != null) {
-                        listener.onSelectionStarted();
-                    }
+                    if (first && listener != null) listener.onSelectionStarted();
                     invalidate();
                 }
                 return true;
@@ -284,22 +311,28 @@ public class SelectionOverlayView extends View {
             case MotionEvent.ACTION_CANCEL: {
                 lassoPath.lineTo(x, y);
                 lassoPath.close();
-
                 computePathBounds();
 
-                float dragDistance = Math.max(pathBounds.width(), pathBounds.height());
-                if (!hasMoved || dragDistance < MIN_DRAG_DISTANCE_PX) {
-                    // Dianggap tap saja, bukan seleksi — batalkan.
+                float drag = Math.max(pathBounds.width(), pathBounds.height());
+                if (!hasMoved || drag < MIN_DRAG_DISTANCE_PX) {
                     lassoPath.reset();
                     hasMoved = false;
+                    mode = Mode.IDLE;
                     invalidate();
                     if (listener != null) listener.onSelectionCancelled();
                     return true;
                 }
 
+                // Konversi lasso → bingkai persegi panjang adjustable
+                selectionRect.set(pathBounds);
+                // Sedikit padding biar objek tidak mepet tepi
+                float pad = dp(4);
+                selectionRect.inset(-pad, -pad);
+                clampRect(selectionRect);
+                mode = Mode.ADJUST;
                 invalidate();
                 if (listener != null) {
-                    listener.onSelectionComplete(new RectF(pathBounds));
+                    listener.onSelectionComplete(new RectF(selectionRect));
                 }
                 return true;
             }
@@ -307,50 +340,131 @@ public class SelectionOverlayView extends View {
         return super.onTouchEvent(event);
     }
 
+    private boolean handleAdjustTouch(MotionEvent event, float x, float y) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                activeHandle = hitTestHandle(x, y);
+                if (activeHandle == HANDLE_NONE) {
+                    // Tap di luar: boleh mulai lasso baru
+                    mode = Mode.DRAWING;
+                    lassoPath.reset();
+                    hasMoved = false;
+                    selectionRect.setEmpty();
+                    lassoPath.moveTo(x, y);
+                    lastX = x;
+                    lastY = y;
+                    invalidate();
+                    return true;
+                }
+                if (activeHandle == HANDLE_MOVE) {
+                    touchOffsetX = x - selectionRect.left;
+                    touchOffsetY = y - selectionRect.top;
+                } else {
+                    touchOffsetX = x;
+                    touchOffsetY = y;
+                }
+                return true;
+
+            case MotionEvent.ACTION_MOVE:
+                if (activeHandle == HANDLE_NONE) return true;
+                if (activeHandle == HANDLE_MOVE) {
+                    float w = selectionRect.width();
+                    float h = selectionRect.height();
+                    float nl = x - touchOffsetX;
+                    float nt = y - touchOffsetY;
+                    selectionRect.set(nl, nt, nl + w, nt + h);
+                    clampRect(selectionRect);
+                } else {
+                    resizeByHandle(activeHandle, x, y);
+                    clampRect(selectionRect);
+                }
+                invalidate();
+                if (listener != null) {
+                    listener.onSelectionBoundsChanged(new RectF(selectionRect));
+                }
+                return true;
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                activeHandle = HANDLE_NONE;
+                if (listener != null && !selectionRect.isEmpty()) {
+                    listener.onSelectionBoundsChanged(new RectF(selectionRect));
+                }
+                return true;
+        }
+        return true;
+    }
+
+    private void resizeByHandle(int handle, float x, float y) {
+        float min = dp(MIN_RECT_SIZE_DP);
+        switch (handle) {
+            case 0: // TL
+                selectionRect.left = Math.min(x, selectionRect.right - min);
+                selectionRect.top = Math.min(y, selectionRect.bottom - min);
+                break;
+            case 1: // T
+                selectionRect.top = Math.min(y, selectionRect.bottom - min);
+                break;
+            case 2: // TR
+                selectionRect.right = Math.max(x, selectionRect.left + min);
+                selectionRect.top = Math.min(y, selectionRect.bottom - min);
+                break;
+            case 3: // R
+                selectionRect.right = Math.max(x, selectionRect.left + min);
+                break;
+            case 4: // BR
+                selectionRect.right = Math.max(x, selectionRect.left + min);
+                selectionRect.bottom = Math.max(y, selectionRect.top + min);
+                break;
+            case 5: // B
+                selectionRect.bottom = Math.max(y, selectionRect.top + min);
+                break;
+            case 6: // BL
+                selectionRect.left = Math.min(x, selectionRect.right - min);
+                selectionRect.bottom = Math.max(y, selectionRect.top + min);
+                break;
+            case 7: // L
+                selectionRect.left = Math.min(x, selectionRect.right - min);
+                break;
+        }
+    }
+
+    private void clampRect(RectF r) {
+        float min = dp(MIN_RECT_SIZE_DP);
+        if (r.left < 0) r.left = 0;
+        if (r.top < 0) r.top = 0;
+        if (r.right > getWidth()) r.right = getWidth();
+        if (r.bottom > getHeight()) r.bottom = getHeight();
+        if (r.width() < min) r.right = r.left + min;
+        if (r.height() < min) r.bottom = r.top + min;
+        if (r.right > getWidth()) {
+            r.right = getWidth();
+            r.left = r.right - min;
+        }
+        if (r.bottom > getHeight()) {
+            r.bottom = getHeight();
+            r.top = r.bottom - min;
+        }
+        if (r.left < 0) r.left = 0;
+        if (r.top < 0) r.top = 0;
+    }
+
     private void computePathBounds() {
         RectF bounds = new RectF();
         lassoPath.computeBounds(bounds, true);
-
-        // Clamp ke ukuran view supaya tidak keluar batas bitmap saat crop.
         bounds.left = Math.max(0, bounds.left);
         bounds.top = Math.max(0, bounds.top);
         bounds.right = Math.min(getWidth(), bounds.right);
         bounds.bottom = Math.min(getHeight(), bounds.bottom);
-
         pathBounds.set(bounds);
     }
 
-    /** Path lasso saat ini, dipakai untuk membuat masked-crop (bukan cuma bounding box). */
-    public Path getLassoPath() {
-        return lassoPath;
-    }
-
-    /** Hentikan animator internal (RGB flow). Dipanggil sebelum view benar-benar dilepas. */
     public void destroy() {
-        if (rgbFlowAnimator != null) {
-            rgbFlowAnimator.cancel();
-        }
+        if (rgbFlowAnimator != null) rgbFlowAnimator.cancel();
     }
 
-    /**
-     * Fade-out singkat sebelum view ini dilepas dari WindowManager, supaya
-     * penutupan overlay (tombol ✕, tap-di-luar tanpa seleksi, dst) terasa
-     * smooth simetris dengan fade-in kemunculannya — sebelumnya overlay ini
-     * langsung hilang seketika (snap) saat ditutup, berbeda dari
-     * TranslationOverlayView/LoadingStatusView yang sudah pakai fade-out.
-     *
-     * rgbFlowAnimator dibatalkan lebih dulu supaya tidak ada
-     * invalidate() sia-sia selama fade berjalan.
-     *
-     * @param onEnd dipanggil setelah animasi selesai — pemanggil (Service)
-     *              yang bertanggung jawab benar-benar me-remove view dari
-     *              WindowManager di sini, sama seperti pola dismissAnimated
-     *              pada TranslationOverlayView.
-     */
     public void dismissAnimated(Runnable onEnd) {
-        if (rgbFlowAnimator != null) {
-            rgbFlowAnimator.cancel();
-        }
+        if (rgbFlowAnimator != null) rgbFlowAnimator.cancel();
         animate()
                 .alpha(0f)
                 .setDuration(FADE_OUT_DURATION_MS)

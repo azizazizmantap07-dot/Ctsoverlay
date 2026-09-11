@@ -315,6 +315,12 @@ public class OverlayCaptureService extends Service {
             }
 
             @Override
+            public void onSelectionBoundsChanged(RectF bounds) {
+                // User menggeser/melebarkan bingkai — update crop persegi
+                updateSelectionCrop(bounds);
+            }
+
+            @Override
             public void onSelectionCancelled() {
                 Log.d(TAG, "Seleksi dibatalkan (tap tanpa drag) — tutup overlay");
                 closeOverlayAndStop();
@@ -543,18 +549,25 @@ public class OverlayCaptureService extends Service {
     }
 
     private void handleSelectionComplete(RectF bounds) {
-        Log.d(TAG, "Seleksi selesai, bounds=" + bounds);
-        currentBounds = bounds;
+        Log.d(TAG, "Seleksi selesai → bingkai adjustable, bounds=" + bounds);
+        updateSelectionCrop(bounds);
+    }
 
-        currentCrop = BitmapCropUtil.cropToPath(fullScreenshot, selectionView.getLassoPath(), bounds);
-        if (currentCrop == null) {
-            Log.e(TAG, "Crop gagal (bounds tidak valid)");
-            closeOverlayAndStop();
-            return;
+    /**
+     * Update crop persegi dari bounds bingkai (setelah lasso dikonversi
+     * ke rect, atau setelah user resize/geser handle).
+     */
+    private void updateSelectionCrop(RectF bounds) {
+        if (bounds == null || fullScreenshot == null) return;
+        currentBounds = new RectF(bounds);
+        if (currentCrop != null && !currentCrop.isRecycled()) {
+            currentCrop.recycle();
         }
-        // Menu ikon di bawah sudah tampil sejak awal (showBottomMenu) dan
-        // tetap di tempatnya; sekarang aksinya otomatis mengarah ke
-        // currentCrop karena listener di atas mengecek currentCrop != null.
+        // Crop persegi rapi (bukan mask path freeform) — mirip CTS asli
+        currentCrop = BitmapCropUtil.cropToRect(fullScreenshot, currentBounds);
+        if (currentCrop == null) {
+            Log.e(TAG, "Crop gagal (bounds tidak valid): " + bounds);
+        }
     }
 
     // ---- OCR-only (Salin Teks) ----
