@@ -15,7 +15,6 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -43,7 +42,7 @@ import com.israfilx.circlesearch.R;
  * Floating trigger: pil visual 9×56 dp di tepi kiri, area sentuh lebih besar
  * agar klik/swipe responsif tanpa mengubah ukuran visual.
  *
- * Saat di-expand jadi tombol bulat, tombol menampilkan ikon robot chrome
+ * Saat di-expand jadi tombol bulat, tombol menampilkan ikon yin-yang
  * (drawable statis) yang berputar penuh, dengan bola tengah yang berdenyut
  * dan berganti warna biru → oranye → ungu, dua kali ganti warna per putaran.
  */
@@ -90,15 +89,9 @@ public class FloatingTriggerService extends Service {
     private boolean animating = false;
     private int savedY = 200;
     private int colorIndex = 0;
-    /** Sudut putar tombol bulat (derajat). Ikon robot chrome ikut berputar penuh mengikuti ini. */
+    /** Sudut putar tombol bulat (derajat). Ikon yin-yang ikut berputar penuh mengikuti ini. */
     private float spinAngle = 0f;
     private ValueAnimator spinAnim;
-    /** Fase warna bola tengah: 0..1, dipetakan ke biru→oranye→ungu→biru. */
-    private float coreColorPhase = 0f;
-    private ValueAnimator coreColorAnim;
-    /** Denyut skala bola tengah (0..1, mind-breathing effect). */
-    private float corePulsePhase = 0f;
-    private ValueAnimator corePulseAnim;
     /** Animasi hide/show pil: memendek→hilang saat hide, memanjang dari pendek saat show. */
     private ValueAnimator visibilityAnim;
     /** true selagi animasi hide berjalan, untuk mencegah addView baru menimpa sebelum removeView selesai. */
@@ -377,9 +370,8 @@ public class FloatingTriggerService extends Service {
     }
 
     /**
-     * Putaran ikon robot chrome, ~2 putaran/detik, smooth.
-     * Bola tengah berdenyut (scale pulsing) dan berganti warna
-     * biru → oranye → ungu, dua kali ganti warna per satu putaran penuh.
+     * Putaran ikon yin-yang, ~2 putaran/detik, smooth.
+     * Hanya rotasi — tanpa bola tengah berdenyut.
      */
     private void startChromeSpin() {
         stopChromeSpin();
@@ -393,25 +385,6 @@ public class FloatingTriggerService extends Service {
             if (pillView != null) pillView.invalidate();
         });
         spinAnim.start();
-
-        // Warna bola tengah: siklus penuh (biru→oranye→ungu→biru) berdurasi setengah
-        // durasi 1 putaran ikon, sehingga warna berganti 2x setiap 1 putaran penuh.
-        coreColorAnim = ValueAnimator.ofFloat(0f, 1f);
-        coreColorAnim.setDuration(250); // setengah dari 500ms = 2x per putaran
-        coreColorAnim.setRepeatCount(ValueAnimator.INFINITE);
-        coreColorAnim.setRepeatMode(ValueAnimator.RESTART);
-        coreColorAnim.setInterpolator(new android.view.animation.LinearInterpolator());
-        coreColorAnim.addUpdateListener(a -> coreColorPhase = (float) a.getAnimatedValue());
-        coreColorAnim.start();
-
-        // Denyut skala bola tengah (membesar-mengecil halus)
-        corePulseAnim = ValueAnimator.ofFloat(0f, 1f);
-        corePulseAnim.setDuration(450);
-        corePulseAnim.setRepeatCount(ValueAnimator.INFINITE);
-        corePulseAnim.setRepeatMode(ValueAnimator.REVERSE);
-        corePulseAnim.setInterpolator(new android.view.animation.DecelerateInterpolator());
-        corePulseAnim.addUpdateListener(a -> corePulsePhase = (float) a.getAnimatedValue());
-        corePulseAnim.start();
     }
 
     private void stopChromeSpin() {
@@ -420,16 +393,6 @@ public class FloatingTriggerService extends Service {
             spinAnim = null;
         }
         spinAngle = 0f;
-        if (coreColorAnim != null) {
-            coreColorAnim.cancel();
-            coreColorAnim = null;
-        }
-        coreColorPhase = 0f;
-        if (corePulseAnim != null) {
-            corePulseAnim.cancel();
-            corePulseAnim = null;
-        }
-        corePulsePhase = 0f;
     }
 
     private void scheduleAutoCollapse() {
@@ -595,6 +558,10 @@ public class FloatingTriggerService extends Service {
     private class PillView extends View {
         private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private Bitmap yinIcon;
+        private final Rect srcRect = new Rect();
+        private final RectF dstRect = new RectF();
         private boolean isExpanded = false;
         private float progress = 0f;
         /** 0 = pil tersembunyi (memendek total dari tengah), 1 = ukuran penuh normal. */
@@ -609,9 +576,7 @@ public class FloatingTriggerService extends Service {
             fillPaint.setColor(CYCLE_COLORS[0]);
             dotPaint.setColor(Color.WHITE);
             dotPaint.setStyle(Paint.Style.FILL);
-            // BlurMaskFilter (denyut glow bola tengah) butuh software layer agar konsisten di semua device
-            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-            robotIcon = BitmapFactory.decodeResource(getResources(), R.drawable.chrome_robot_icon);
+            yinIcon = BitmapFactory.decodeResource(getResources(), R.drawable.yin_icon);
         }
 
         void setFillColor(int color) {
@@ -628,27 +593,6 @@ public class FloatingTriggerService extends Service {
 
         void setVisibilityProgress(float p) {
             visibilityProgress = Math.max(0f, Math.min(1f, p));
-        }
-
-        private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        private final Paint corePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint coreGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private Bitmap robotIcon;
-        private final Rect srcRect = new Rect();
-        private final RectF dstRect = new RectF();
-
-        /** Warna bola tengah pada fase 0..1: biru → oranye → ungu → biru (loop). */
-        private int coreColorAt(float phase) {
-            float p = phase - (float) Math.floor(phase);
-            // Warna bola inti dilunakkan ~30%
-            int blue = Color.rgb(28, 91, 178);
-            int orange = Color.rgb(178, 98, 21);
-            int purple = Color.rgb(119, 42, 161);
-            if (p < 0.5f) {
-                return (int) new ArgbEvaluator().evaluate(p / 0.5f, blue, orange);
-            } else {
-                return (int) new ArgbEvaluator().evaluate((p - 0.5f) / 0.5f, orange, purple);
-            }
         }
 
         @Override
@@ -684,43 +628,21 @@ public class FloatingTriggerService extends Service {
                 RectF rect = new RectF(left, top, left + curW, top + curH);
                 canvas.drawRoundRect(rect, corner, corner, fillPaint);
             } else {
-                // Tombol bulat: ikon robot chrome berputar + bola tengah berdenyut warna
+                // Tombol bulat: ikon yin-yang berputar (tanpa bola tengah)
                 float chromeAlpha = Math.min(1f, (progress - 0.35f) / 0.65f);
 
-                // 1) Ikon robot chrome, diputar penuh mengikuti spinAngle
-                if (robotIcon != null) {
+                if (yinIcon != null) {
                     iconPaint.setAlpha((int) (255 * chromeAlpha));
                     int save = canvas.save();
                     canvas.rotate(spinAngle, cx, cy);
-                    srcRect.set(0, 0, robotIcon.getWidth(), robotIcon.getHeight());
-                    dstRect.set(cx - radius, cy - radius, cx + radius, cy + radius);
-                    canvas.drawBitmap(robotIcon, srcRect, dstRect, iconPaint);
+                    srcRect.set(0, 0, yinIcon.getWidth(), yinIcon.getHeight());
+                    // Sedikit inset agar ikon tidak mepet tepi lingkaran
+                    float pad = radius * 0.08f;
+                    dstRect.set(cx - radius + pad, cy - radius + pad,
+                            cx + radius - pad, cy + radius - pad);
+                    canvas.drawBitmap(yinIcon, srcRect, dstRect, iconPaint);
                     canvas.restoreToCount(save);
                 }
-
-                // 2) Bola tengah: berdenyut (scale) + berganti warna biru/oranye/ungu
-                int coreColor = coreColorAt(coreColorPhase);
-                float coreBaseRadius = radius * 0.30f;
-                float corePulseScale = 1f + 0.12f * corePulsePhase;
-                float coreRadius = coreBaseRadius * corePulseScale;
-
-                // Glow lembut di sekitar bola, warna & ukuran ikut denyut yang sama
-                coreGlowPaint.setStyle(Paint.Style.FILL);
-                coreGlowPaint.setColor(Color.argb((int) (255 * chromeAlpha),
-                        Color.red(coreColor), Color.green(coreColor), Color.blue(coreColor)));
-                coreGlowPaint.setMaskFilter(new BlurMaskFilter(coreRadius * 0.9f, BlurMaskFilter.Blur.NORMAL));
-                canvas.drawCircle(cx, cy, coreRadius * 0.9f, coreGlowPaint);
-                coreGlowPaint.setMaskFilter(null);
-
-                // Bola inti solid di atas glow
-                corePaint.setStyle(Paint.Style.FILL);
-                corePaint.setColor(Color.argb((int) (255 * chromeAlpha),
-                        Color.red(coreColor), Color.green(coreColor), Color.blue(coreColor)));
-                canvas.drawCircle(cx, cy, coreRadius, corePaint);
-
-                // Highlight kecil di bola agar terlihat mengkilap seperti pada gambar acuan
-                corePaint.setColor(Color.argb((int) (180 * chromeAlpha), 255, 255, 255));
-                canvas.drawCircle(cx - coreRadius * 0.3f, cy - coreRadius * 0.3f, coreRadius * 0.28f, corePaint);
             }
         }
 
