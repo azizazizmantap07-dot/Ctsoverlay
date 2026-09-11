@@ -25,7 +25,6 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.israfilx.circlesearch.root.RootShell;
 import com.israfilx.circlesearch.service.FloatingTriggerService;
 import com.israfilx.circlesearch.service.ScreenshotAccessibilityService;
 import com.israfilx.circlesearch.util.OcrTranslateHelper;
@@ -39,7 +38,7 @@ import java.util.Set;
  *
  * Fitur:
  *  - Status dan pengaturan semua perizinan yang diperlukan
- *    (tampil di atas aplikasi lain, asisten digital, root, dsb.)
+ *    (tampil di atas aplikasi lain, asisten digital, floating button, dsb.)
  *  - Manajemen unduhan model bahasa (manual, satu per satu atau semua)
  *
  * App ini dirancang "tidak terlihat" saat dipakai sehari-hari
@@ -60,7 +59,6 @@ public class MainActivity extends Activity {
 
     private TextView statusOverlay;
     private TextView statusAssistant;
-    private TextView statusRoot;
     private TextView statusFloating;
     private TextView statusA11y;
     private TextView statusBattery;
@@ -146,9 +144,9 @@ public class MainActivity extends Activity {
         root.addView(btnBattery);
 
         // ============================================================
-        // NON ROOT — SUPPORT ASSISTEN
+        // MODE ASISTEN
         // ============================================================
-        root.addView(sectionHeader("Non root · support asisten"));
+        root.addView(sectionHeader("Mode Asisten"));
 
         root.addView(itemLabel("Asisten Digital (default)"));
         statusAssistant = statusText();
@@ -158,9 +156,9 @@ public class MainActivity extends Activity {
         root.addView(btnAssistant);
 
         // ============================================================
-        // NON ROOT — TIDAK SUPPORT ASSISTEN
+        // FLOATING BUTTON
         // ============================================================
-        root.addView(sectionHeader("Non root · tidak support asisten"));
+        root.addView(sectionHeader("Floating Button"));
 
         root.addView(itemLabel("Floating Trigger Button"));
         statusFloating = statusText();
@@ -169,51 +167,6 @@ public class MainActivity extends Activity {
         btnToggleFloating.setOnClickListener(v -> toggleFloatingTrigger());
         root.addView(btnToggleFloating);
 
-        // ============================================================
-        // ROOT MODE
-        // ============================================================
-        root.addView(sectionHeader("Root mode"));
-
-        root.addView(itemLabel("Set asisten default (via root)"));
-        statusRoot = statusText();
-        root.addView(statusRoot);
-        Button btnCheckRoot = actionButton("Cek akses root");
-        btnCheckRoot.setOnClickListener(v -> checkRoot());
-        root.addView(btnCheckRoot);
-        Button btnSetAssistantRoot = actionButton("Set sebagai Asisten (via root)");
-        btnSetAssistantRoot.setOnClickListener(v -> runSetupAssistantRoot());
-        root.addView(btnSetAssistantRoot);
-
-        // ============================================================
-        // PENCARIAN VISUAL
-        // ============================================================
-        root.addView(sectionHeader("Pencarian visual"));
-
-        root.addView(bodyText(
-                "Pilih cara menampilkan hasil \"Cari gambar\". Mode WebView "
-                        + "membuka hasil di dalam aplikasi (Yandex / Bing / Google) "
-                        + "sehingga terasa menyatu. Mode eksternal melempar ke "
-                        + "aplikasi pencarian yang terpasang (perilaku lama)."));
-
-        final TextView statusVisualSearch = statusText();
-        root.addView(statusVisualSearch);
-
-        Button btnToggleVisualSearch = actionButton("Ganti mode pencarian visual");
-        btnToggleVisualSearch.setOnClickListener(v -> {
-            SharedPreferences prefs = getSharedPreferences(
-                    com.israfilx.circlesearch.util.ImageSearchShareUtil.PREFS_NAME, MODE_PRIVATE);
-            boolean current = prefs.getBoolean(
-                    com.israfilx.circlesearch.util.ImageSearchShareUtil.KEY_VISUAL_SEARCH_IN_WEBVIEW, true);
-            boolean next = !current;
-            prefs.edit().putBoolean(
-                    com.israfilx.circlesearch.util.ImageSearchShareUtil.KEY_VISUAL_SEARCH_IN_WEBVIEW, next).apply();
-            updateVisualSearchStatus(statusVisualSearch);
-            Toast.makeText(this,
-                    next ? "Mode: di dalam aplikasi (WebView)" : "Mode: aplikasi eksternal",
-                    Toast.LENGTH_SHORT).show();
-        });
-        root.addView(btnToggleVisualSearch);
-        updateVisualSearchStatus(statusVisualSearch);
 
         // ============================================================
         // MENU BAHASA
@@ -361,10 +314,6 @@ public class MainActivity extends Activity {
                 : "✗ Belum diatur — ketuk tombol di bawah untuk mengatur");
         statusAssistant.setTextColor(isAssistant ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_BAD));
 
-        // Root (cek cepat tanpa blocking lama)
-        statusRoot.setText("Menekan tombol \"Cek akses root\" untuk memeriksa…");
-        statusRoot.setTextColor(Color.parseColor(STATUS_NEUTRAL));
-
         // Floating
         boolean floatingOn = getSharedPreferences(FloatingTriggerService.PREFS, MODE_PRIVATE)
                 .getBoolean(FloatingTriggerService.KEY_ENABLED, false);
@@ -381,7 +330,7 @@ public class MainActivity extends Activity {
         if (statusA11y != null) {
             statusA11y.setText(a11y
                     ? "✓ Accessibility aktif (screenshot siap)"
-                    : "✗ Accessibility belum aktif — wajib untuk floating tanpa root");
+                    : "✗ Accessibility belum aktif — wajib untuk floating");
             statusA11y.setTextColor(a11y
                     ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_BAD));
         }
@@ -464,32 +413,6 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             openAppSettings();
         }
-    }
-
-    private void checkRoot() {
-        statusRoot.setText("Memeriksa…");
-        new Thread(() -> {
-            boolean ok = RootShell.open();
-            mainHandler.post(() -> {
-                statusRoot.setText(ok ? "✓ Akses root TERSEDIA" : "✗ Akses root TIDAK TERSEDIA");
-                statusRoot.setTextColor(ok ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_BAD));
-            });
-        }).start();
-    }
-
-    private void runSetupAssistantRoot() {
-        String pkg = getPackageName();
-        new Thread(() -> {
-            RootShell.exec("settings put secure voice_interaction_service " + pkg + "/.service.MyVoiceInteractionService");
-            RootShell.exec("settings put secure assistant " + pkg + "/.service.MyVoiceInteractionService");
-            String check = RootShell.exec("settings get secure assistant");
-            mainHandler.post(() -> {
-                Toast.makeText(this, "Setup asisten selesai.", Toast.LENGTH_SHORT).show();
-                statusAssistant.setText("Nilai 'assistant' sekarang:\n" +
-                        (check == null ? "(gagal membaca)" : check.trim()));
-                refreshPermissionStatus();
-            });
-        }).start();
     }
 
     private void openOverlaySettings() {
@@ -734,21 +657,6 @@ public class MainActivity extends Activity {
     // Helper UI
     // ----------------------------------------------------------------
 
-    private void updateVisualSearchStatus(TextView statusView) {
-        if (statusView == null) return;
-        boolean inWebView = getSharedPreferences(
-                com.israfilx.circlesearch.util.ImageSearchShareUtil.PREFS_NAME, MODE_PRIVATE)
-                .getBoolean(com.israfilx.circlesearch.util.ImageSearchShareUtil.KEY_VISUAL_SEARCH_IN_WEBVIEW, true);
-        if (inWebView) {
-            statusView.setText("✓ Saat ini: di dalam aplikasi (WebView)\n"
-                    + "Hasil pencarian gambar tampil di WebView milik app ini.");
-            statusView.setTextColor(Color.parseColor(STATUS_OK));
-        } else {
-            statusView.setText("○ Saat ini: aplikasi eksternal\n"
-                    + "Gambar dikirim ke Yandex / Bing / Google Lens / chooser.");
-            statusView.setTextColor(Color.parseColor(STATUS_NEUTRAL));
-        }
-    }
 
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density);

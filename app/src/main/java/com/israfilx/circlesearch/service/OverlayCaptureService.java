@@ -25,7 +25,6 @@ import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 
-import com.israfilx.circlesearch.root.RootShell;
 import com.israfilx.circlesearch.ui.BottomIconMenu;
 import com.israfilx.circlesearch.ui.LoadingStatusView;
 import com.israfilx.circlesearch.ui.RainbowGlowView;
@@ -38,11 +37,11 @@ import com.israfilx.circlesearch.util.OcrTranslateHelper;
 import java.util.List;
 
 /**
- * Foreground service tempat capture layar (root screencap) dan overlay
- * seleksi dijalankan.
+ * Foreground service tempat capture layar (Assist API / Accessibility)
+ * dan overlay seleksi dijalankan.
  *
  * Alur:
- *  1. Trigger diterima -> screencap via root ke file cache internal
+ *  1. Trigger diterima -> ambil screenshot via Assist API atau Accessibility
  *  2. Load bitmap, tampilkan sebagai overlay FULL-SCREEN (edge-to-edge,
  *     menutupi juga area status bar & navigasi — lihat
  *     {@link #applyFullscreenImmersive}) dengan SelectionOverlayView di
@@ -207,8 +206,7 @@ public class OverlayCaptureService extends Service {
     /**
      * Prioritas capture:
      *  1. Screenshot Assist API (dari VoiceInteractionSession)
-     *  2. Root screencap
-     *  3. AccessibilityService.takeScreenshot (floating / non-assistant)
+     *  2. AccessibilityService.takeScreenshot (floating / non-assistant)
      */
     private void handleCaptureTrigger(Intent intent) {
         String assistPath = intent.getStringExtra(EXTRA_ASSIST_SCREENSHOT_PATH);
@@ -231,12 +229,6 @@ public class OverlayCaptureService extends Service {
     }
 
     private void handleCaptureFallback() {
-        if (RootShell.open()) {
-            Log.d(TAG, "Root tersedia — screencap silent");
-            new Thread(this::doRootScreencapAndShowOverlay, "circlesearch-screencap").start();
-            return;
-        }
-
         if (ScreenshotAccessibilityService.isAvailable()) {
             Log.d(TAG, "Memakai AccessibilityService.takeScreenshot");
             ScreenshotAccessibilityService.takeScreenshot(
@@ -262,41 +254,14 @@ public class OverlayCaptureService extends Service {
             return;
         }
 
-        Log.e(TAG, "Tidak ada metode capture (Assist/Root/Accessibility)");
+        Log.e(TAG, "Tidak ada metode capture (Assist/Accessibility)");
         mainHandler.post(() -> {
             Toast.makeText(this,
-                    "Aktifkan Asisten Digital, Root, atau Accessibility untuk capture",
+                    "Aktifkan Asisten Digital atau Accessibility untuk capture",
                     Toast.LENGTH_LONG).show();
             notifyFloatingOverlayClosed();
             stopSelf();
         });
-    }
-
-    private void doRootScreencapAndShowOverlay() {
-        String capPath = getCacheDir().getAbsolutePath() + "/circlesearch_capture.png";
-        boolean ok = RootShell.screencapToFile(capPath);
-
-        if (!ok) {
-            Log.e(TAG, "screencap root gagal, membatalkan overlay");
-            mainHandler.post(() -> {
-                notifyFloatingOverlayClosed();
-                stopSelf();
-            });
-            return;
-        }
-
-        Bitmap bmp = BitmapFactory.decodeFile(capPath);
-        if (bmp == null) {
-            Log.e(TAG, "Gagal decode hasil screencap root");
-            mainHandler.post(() -> {
-                notifyFloatingOverlayClosed();
-                stopSelf();
-            });
-            return;
-        }
-
-        fullScreenshot = bmp;
-        mainHandler.post(this::showSelectionOverlay);
     }
 
     /** Beri tahu FloatingTriggerService agar menampilkan pil lagi. */

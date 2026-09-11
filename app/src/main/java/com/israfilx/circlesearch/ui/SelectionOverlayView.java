@@ -24,8 +24,8 @@ import android.view.animation.LinearInterpolator;
  *  1. User menggambar lasso bebas (dengan stroke RGB mengalir).
  *  2. Saat jari diangkat, path diubah otomatis menjadi bingkai
  *     persegi/persegi panjang (bounding box) yang rapi.
- *  3. Bingkai bisa diperbesar/diperkecil lewat 8 handle (4 sudut + 4
- *     tengah sisi) dan digeser utuh dengan drag di dalam area.
+ *  3. Bingkai rounded dengan 4 sudut halus (handle sudut saja, ala CTS)
+ *     untuk memperbesar/memperkecil, serta digeser utuh dengan drag di dalam.
  *  4. Aksi Cari / Translate / Salin memakai crop persegi akhir.
  */
 public class SelectionOverlayView extends View {
@@ -69,7 +69,8 @@ public class SelectionOverlayView extends View {
     private boolean hasMoved = false;
 
     // Handle drag state (ADJUST mode)
-    private int activeHandle = HANDLE_NONE; // -1 none, 0-7 handles, 8 = move body
+    // 0=TL 1=TR 2=BR 3=BL, HANDLE_MOVE = geser body
+    private int activeHandle = HANDLE_NONE;
     private float touchOffsetX, touchOffsetY;
 
     private float colorPhase = 0f;
@@ -77,7 +78,10 @@ public class SelectionOverlayView extends View {
 
     private static final int HANDLE_NONE = -1;
     private static final int HANDLE_MOVE = 8;
-    // 0=TL 1=T 2=TR 3=R 4=BR 5=B 6=BL 7=L
+    private static final int HANDLE_TL = 0;
+    private static final int HANDLE_TR = 1;
+    private static final int HANDLE_BR = 2;
+    private static final int HANDLE_BL = 3;
     private static final int COLOR_RED    = 0xFFFF2D2D;
     private static final int COLOR_YELLOW = 0xFFFFD21E;
     private static final int COLOR_GREEN  = 0xFF32DC6E;
@@ -107,18 +111,26 @@ public class SelectionOverlayView extends View {
         glowPaint.setStrokeCap(Paint.Cap.ROUND);
 
         framePaint.setStyle(Paint.Style.STROKE);
-        framePaint.setStrokeWidth(dp(2.5f));
+        framePaint.setStrokeWidth(dp(2.8f));
         framePaint.setColor(Color.WHITE);
+        framePaint.setStrokeJoin(Paint.Join.ROUND);
+        framePaint.setStrokeCap(Paint.Cap.ROUND);
 
         frameFillPaint.setStyle(Paint.Style.FILL);
-        frameFillPaint.setColor(Color.argb(28, 255, 255, 255));
+        frameFillPaint.setColor(Color.argb(20, 255, 255, 255));
 
-        handlePaint.setStyle(Paint.Style.FILL);
+        // Sudut handle: stroke putih tebal, ujung membulat (ala CTS)
+        handlePaint.setStyle(Paint.Style.STROKE);
+        handlePaint.setStrokeWidth(dp(4.2f));
+        handlePaint.setStrokeCap(Paint.Cap.ROUND);
+        handlePaint.setStrokeJoin(Paint.Join.ROUND);
         handlePaint.setColor(Color.WHITE);
 
         handleStrokePaint.setStyle(Paint.Style.STROKE);
-        handleStrokePaint.setStrokeWidth(dp(1.5f));
-        handleStrokePaint.setColor(Color.parseColor("#33FFFFFF"));
+        handleStrokePaint.setStrokeWidth(dp(7f));
+        handleStrokePaint.setStrokeCap(Paint.Cap.ROUND);
+        handleStrokePaint.setStrokeJoin(Paint.Join.ROUND);
+        handleStrokePaint.setColor(Color.argb(70, 255, 255, 255));
 
         setWillNotDraw(false);
         startRgbFlow();
@@ -200,40 +212,78 @@ public class SelectionOverlayView extends View {
     /** Stroke RGB di sekeliling rect (untuk mode ADJUST). */
     private void drawRgbRect(Canvas canvas, RectF r) {
         Path rectPath = new Path();
-        float radius = dp(10);
+        float radius = dp(14);
         rectPath.addRoundRect(r, radius, radius, Path.Direction.CW);
         drawRgbPath(canvas, rectPath);
     }
 
+    /**
+     * Gambar 4 sudut halus ala Circle to Search: bracket melengkung
+     * di tiap corner (bukan 8 titik lingkaran).
+     */
     private void drawHandles(Canvas canvas, RectF r) {
-        float hs = dp(7); // handle radius
-        float[][] pts = handlePoints(r);
-        for (float[] p : pts) {
-            canvas.drawCircle(p[0], p[1], hs + dp(2), handleStrokePaint);
-            canvas.drawCircle(p[0], p[1], hs, handlePaint);
-        }
+        float len = dp(18);   // panjang lengan sudut
+        float rad = dp(12);   // radius lengkung sudut (selaras bingkai)
+        Path corner = new Path();
+
+        // TL
+        corner.reset();
+        corner.moveTo(r.left, r.top + len);
+        corner.lineTo(r.left, r.top + rad);
+        corner.quadTo(r.left, r.top, r.left + rad, r.top);
+        corner.lineTo(r.left + len, r.top);
+        canvas.drawPath(corner, handleStrokePaint);
+        canvas.drawPath(corner, handlePaint);
+
+        // TR
+        corner.reset();
+        corner.moveTo(r.right - len, r.top);
+        corner.lineTo(r.right - rad, r.top);
+        corner.quadTo(r.right, r.top, r.right, r.top + rad);
+        corner.lineTo(r.right, r.top + len);
+        canvas.drawPath(corner, handleStrokePaint);
+        canvas.drawPath(corner, handlePaint);
+
+        // BR
+        corner.reset();
+        corner.moveTo(r.right, r.bottom - len);
+        corner.lineTo(r.right, r.bottom - rad);
+        corner.quadTo(r.right, r.bottom, r.right - rad, r.bottom);
+        corner.lineTo(r.right - len, r.bottom);
+        canvas.drawPath(corner, handleStrokePaint);
+        canvas.drawPath(corner, handlePaint);
+
+        // BL
+        corner.reset();
+        corner.moveTo(r.left + len, r.bottom);
+        corner.lineTo(r.left + rad, r.bottom);
+        corner.quadTo(r.left, r.bottom, r.left, r.bottom - rad);
+        corner.lineTo(r.left, r.bottom - len);
+        canvas.drawPath(corner, handleStrokePaint);
+        canvas.drawPath(corner, handlePaint);
     }
 
-    private float[][] handlePoints(RectF r) {
-        float cx = r.centerX();
-        float cy = r.centerY();
+    private float[][] cornerPoints(RectF r) {
         return new float[][]{
-                {r.left, r.top}, {cx, r.top}, {r.right, r.top},
-                {r.right, cy},
-                {r.right, r.bottom}, {cx, r.bottom}, {r.left, r.bottom},
-                {r.left, cy}
+                {r.left, r.top},
+                {r.right, r.top},
+                {r.right, r.bottom},
+                {r.left, r.bottom}
         };
     }
 
     private int hitTestHandle(float x, float y) {
-        float touchR = dp(22);
-        float[][] pts = handlePoints(selectionRect);
+        float touchR = dp(28); // target sentuh sudut lebih lega
+        float[][] pts = cornerPoints(selectionRect);
         for (int i = 0; i < pts.length; i++) {
             float dx = x - pts[i][0];
             float dy = y - pts[i][1];
             if (dx * dx + dy * dy <= touchR * touchR) return i;
         }
-        if (selectionRect.contains(x, y)) return HANDLE_MOVE;
+        // Sedikit inset agar drag di dekat tepi sudut tetap prioritas sudut
+        RectF body = new RectF(selectionRect);
+        body.inset(dp(12), dp(12));
+        if (body.contains(x, y) || selectionRect.contains(x, y)) return HANDLE_MOVE;
         return HANDLE_NONE;
     }
 
@@ -257,7 +307,7 @@ public class SelectionOverlayView extends View {
             // Punch-out rectangular
             int save = canvas.saveLayer(0, 0, getWidth(), getHeight(), null);
             Path rr = new Path();
-            float radius = dp(10);
+            float radius = dp(14);
             rr.addRoundRect(selectionRect, radius, radius, Path.Direction.CW);
             canvas.drawPath(rr, lassoFillPaint);
             Paint clip = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -398,33 +448,21 @@ public class SelectionOverlayView extends View {
     private void resizeByHandle(int handle, float x, float y) {
         float min = dp(MIN_RECT_SIZE_DP);
         switch (handle) {
-            case 0: // TL
+            case HANDLE_TL: // kiri-atas
                 selectionRect.left = Math.min(x, selectionRect.right - min);
                 selectionRect.top = Math.min(y, selectionRect.bottom - min);
                 break;
-            case 1: // T
-                selectionRect.top = Math.min(y, selectionRect.bottom - min);
-                break;
-            case 2: // TR
+            case HANDLE_TR: // kanan-atas
                 selectionRect.right = Math.max(x, selectionRect.left + min);
                 selectionRect.top = Math.min(y, selectionRect.bottom - min);
                 break;
-            case 3: // R
-                selectionRect.right = Math.max(x, selectionRect.left + min);
-                break;
-            case 4: // BR
+            case HANDLE_BR: // kanan-bawah
                 selectionRect.right = Math.max(x, selectionRect.left + min);
                 selectionRect.bottom = Math.max(y, selectionRect.top + min);
                 break;
-            case 5: // B
-                selectionRect.bottom = Math.max(y, selectionRect.top + min);
-                break;
-            case 6: // BL
+            case HANDLE_BL: // kiri-bawah
                 selectionRect.left = Math.min(x, selectionRect.right - min);
                 selectionRect.bottom = Math.max(y, selectionRect.top + min);
-                break;
-            case 7: // L
-                selectionRect.left = Math.min(x, selectionRect.right - min);
                 break;
         }
     }

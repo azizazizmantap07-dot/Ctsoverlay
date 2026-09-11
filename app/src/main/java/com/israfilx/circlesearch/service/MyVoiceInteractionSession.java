@@ -15,7 +15,7 @@ import java.io.FileOutputStream;
 /**
  * Session yang mendarat setiap kali gesture assist sistem dipicu.
  *
- * Path utama non-root: sistem mengirim screenshot lewat
+ * Path utama: sistem mengirim screenshot lewat
  * {@link #onHandleScreenshot(Bitmap)} (supportsAssist=true).
  *
  * Catatan: beberapa ROM mereuse instance session untuk gesture berikutnya.

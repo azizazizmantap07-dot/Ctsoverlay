@@ -62,8 +62,8 @@
              lewat Google Play Store (memberi tahu Play Services untuk
              auto-download model OCR saat instalasi, supaya siap pakai
              tanpa delay pertama kali dipakai). App ini sendiri di-build &
-             didistribusikan di luar Play Store (lihat module_root/,
-             GitHub Actions release), jadi meta-data ini praktis tidak
+             didistribusikan di luar Play Store (lihat GitHub Actions
+             release), jadi meta-data ini praktis tidak
              pernah terpakai — dibiarkan ada hanya sebagai no-op yang
              aman bila suatu saat didistribusikan lewat Play Store juga.
              Tanpa meta-data ini pun OCR tetap jalan normal: model
@@ -121,7 +121,7 @@
 
         <!--
             VoiceInteractionService: ini "pintu masuk" trigger utama.
-            Begitu app ini di-set sebagai default assistant (via root settings),
+            Begitu app ini di-set sebagai default assistant,
             sistem akan memanggil onLaunchVoiceAssist() / SessionService saat
             gesture assist (swipe pojok bawah / long-press power) dipicu.
         -->

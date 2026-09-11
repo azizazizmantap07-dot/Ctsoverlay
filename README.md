@@ -3,32 +3,27 @@
 Aplikasi overlay Android yang meniru cara kerja Circle to Search Google —
 seleksi bebas di layar untuk translate, OCR teks, dan visual search. Trigger
 memakai mekanisme **Default Assistant App**, dipanggil lewat gesture
-assist bawaan ROM (swipe sudut bawah / long-press tombol power).
+assist bawaan ROM (swipe sudut bawah / long-press tombol power), atau lewat
+**Floating Trigger Button**.
 
-**Mode dual (root + non-root):**
-- **Root tersedia** → capture layar silent via `screencap` (tanpa dialog).
-- **Non-root** → otomatis fallback ke **MediaProjection** (user mengizinkan
-  Screen Capture sekali per trigger). Fitur OCR, translate, dan visual search
-  tetap lengkap.
+**Mode trigger (tanpa root):**
+- **Asisten Digital** — capture layar silent lewat Assist API (screenshot
+  sistem, tanpa dialog).
+- **Floating Button** — tombol mengambang di tepi layar; capture lewat
+  AccessibilityService.takeScreenshot.
 
 **Tidak terikat Google.** OCR dan translate berjalan sepenuhnya on-device
 lewat ML Kit (tidak ada data yang dikirim ke server manapun saat OCR/
 translate berlangsung).
 
-**Visual search ("Cari")** punya dua mode (bisa diganti di halaman
-pengaturan):
+**Visual search ("Cari")** selalu di dalam aplikasi (WebView). Gambar
+di-upload ke host sementara (Litterbox 1 jam / Catbox), lalu WebView
+membuka URL hasil reverse search (Yandex / Bing / Google Lens / TinEye)
+— pola sama seperti AKS-Labs/CircleToSearch. Hasil muncul otomatis,
+tanpa file chooser atau Intent ke app eksternal.
 
-1. **Di dalam aplikasi (WebView)** — default. Gambar di-upload ke host
-   sementara (Litterbox 1 jam / Catbox), lalu WebView membuka URL hasil
-   reverse search langsung (Yandex / Bing / Google Lens / TinEye) —
-   pola sama seperti AKS-Labs/CircleToSearch. Hasil muncul otomatis,
-   tanpa file chooser.
-2. **Aplikasi eksternal** — perilaku lama: share Intent ke Yandex → Bing →
-   Google Lens → chooser sistem. Lihat `util/ImageSearchShareUtil.java`
-   untuk urutan preferensi package.
-
-Module Magisk/KernelSU di `module_root/` opsional (auto-set default assistant
-saat boot). Tanpa root, user set manual lewat Settings → Default apps.
+Default assistant di-set manual lewat Settings → Default apps / Aplikasi
+asisten digital.
 
 ## Build via GitHub Actions
 
@@ -49,7 +44,7 @@ tambahan.
 
 ### APK Release (signed, manual, opsional)
 Hanya perlu jika ingin distribusi APK yang ditandatangani dengan keystore
-sendiri (misal untuk dibundel ke module root, atau upload ke tempat lain).
+sendiri (misal upload ke tempat lain).
 
 1. Siapkan keystore (`.jks`), atau generate baru:
    ```
@@ -69,13 +64,6 @@ sendiri (misal untuk dibundel ke module root, atau upload ke tempat lain).
 
 **Jangan pernah commit file keystore (`.jks`) ke repo** — sudah masuk
 `.gitignore`, tapi tetap perhatikan saat menambah file baru.
-
-## Root installer module
-
-Folder `module_root/` adalah module Magisk/KernelSU terpisah yang
-mendaftarkan APK ini sebagai default Assistant App secara otomatis saat
-boot (`settings put secure assistant` / `voice_interaction_service`).
-Flash folder ini sebagai ZIP module setelah APK utama terpasang.
 
 ## Build lokal (opsional, jika punya Android SDK terinstall)
 

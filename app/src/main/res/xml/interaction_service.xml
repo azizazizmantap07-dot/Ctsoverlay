@@ -7,8 +7,7 @@
     supportsAssist=true WAJIB agar sistem mengirim screenshot layar
     ke VoiceInteractionSession.onHandleScreenshot() — ini adalah
     cara resmi Android agar asisten mendapat gambar layar TANPA
-    MediaProjection dialog dan TANPA root (sama seperti AKS-Labs
-    CircleToSearch).
+    MediaProjection dialog (sama seperti AKS-Labs CircleToSearch).
 -->
 <voice-interaction-service
     xmlns:android="http://schemas.android.com/apk/res/android"

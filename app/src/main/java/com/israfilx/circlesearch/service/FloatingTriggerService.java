@@ -536,12 +536,12 @@ public class FloatingTriggerService extends Service {
         cancelAutoCollapse();
         // PENTING: pakai hidePillImmediate() (tanpa animasi), BUKAN hidePill().
         // hidePill() beranimasi ~260ms sebelum benar-benar memanggil
-        // windowManager.removeView() di akhir animasi, sedangkan screencap
-        // root pada OverlayCaptureService di bawah ini berjalan hampir seketika
+        // windowManager.removeView() di akhir animasi, sedangkan capture
+        // pada OverlayCaptureService di bawah ini berjalan hampir seketika
         // di thread terpisah — jauh lebih cepat dari 260ms tsb. Akibatnya
         // window tombol (yang masih ada, sedang beranimasi mengecil) ikut
         // terekam di screenshot. Dengan removeView() seketika di sini, window
-        // sudah pasti tidak ada lagi di WindowManager sebelum screencap dipicu.
+        // sudah pasti tidak ada lagi di WindowManager sebelum capture dipicu.
         hidePillImmediate();
 
         Intent serviceIntent = new Intent(this, OverlayCaptureService.class);
