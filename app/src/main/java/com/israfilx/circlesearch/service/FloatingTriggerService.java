@@ -76,10 +76,11 @@ public class FloatingTriggerService extends Service {
     private static final int TOUCH_BTN_DP = 52;
 
     // Merah / kuning / hijau semi-transparan
+    // RGB cycle dilunakkan ~30% (kecerahan & alpha) agar tidak mencolok
     private static final int[] CYCLE_COLORS = {
-            Color.argb(160, 220, 40, 40),
-            Color.argb(160, 230, 190, 20),
-            Color.argb(160, 40, 170, 70)
+            Color.argb(115, 154, 28, 28),
+            Color.argb(115, 161, 133, 14),
+            Color.argb(115, 28, 119, 49)
     };
 
     private WindowManager windowManager;
@@ -639,9 +640,10 @@ public class FloatingTriggerService extends Service {
         /** Warna bola tengah pada fase 0..1: biru → oranye → ungu → biru (loop). */
         private int coreColorAt(float phase) {
             float p = phase - (float) Math.floor(phase);
-            int blue = Color.rgb(40, 130, 255);
-            int orange = Color.rgb(255, 140, 30);
-            int purple = Color.rgb(170, 60, 230);
+            // Warna bola inti dilunakkan ~30%
+            int blue = Color.rgb(28, 91, 178);
+            int orange = Color.rgb(178, 98, 21);
+            int purple = Color.rgb(119, 42, 161);
             if (p < 0.5f) {
                 return (int) new ArgbEvaluator().evaluate(p / 0.5f, blue, orange);
             } else {

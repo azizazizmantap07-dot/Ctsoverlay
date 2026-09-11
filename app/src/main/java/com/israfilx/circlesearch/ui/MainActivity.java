@@ -103,7 +103,7 @@ public class MainActivity extends Activity {
         title.setLetterSpacing(0.12f);
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         title.setPadding(0, dp(12), 0, dp(4));
-        title.setShadowLayer(18f, 0f, 0f, Color.parseColor("#DC2828"));
+        title.setShadowLayer(16f, 0f, 0f, Color.parseColor("#9A1C1C"));
         root.addView(title);
         startTitleRgbAnimation(title);
 
@@ -215,9 +215,10 @@ public class MainActivity extends Activity {
      * "bernapas" (membesar-mengecil) agar terasa seperti neon sign yang hidup.
      */
     private void startTitleRgbAnimation(TextView title) {
-        int red = Color.rgb(255, 45, 45);
-        int yellow = Color.rgb(255, 210, 30);
-        int green = Color.rgb(50, 220, 110);
+        // RGB judul dilunakkan ~30% supaya tidak terlalu terang
+        int red = Color.rgb(178, 32, 32);
+        int yellow = Color.rgb(178, 147, 21);
+        int green = Color.rgb(35, 154, 77);
 
         titleColorAnim = ValueAnimator.ofObject(
                 new ArgbEvaluator(), red, yellow, green, red);
@@ -233,7 +234,7 @@ public class MainActivity extends Activity {
         titleColorAnim.start();
 
         // Radius glow "bernapas" — dianimasikan terpisah agar independen dari warna
-        titleGlowPulseAnim = ValueAnimator.ofFloat(14f, 26f);
+        titleGlowPulseAnim = ValueAnimator.ofFloat(10f, 18f);
         titleGlowPulseAnim.setDuration(1400);
         titleGlowPulseAnim.setRepeatCount(ValueAnimator.INFINITE);
         titleGlowPulseAnim.setRepeatMode(ValueAnimator.REVERSE);

@@ -82,9 +82,10 @@ public class SelectionOverlayView extends View {
     private static final int HANDLE_TR = 1;
     private static final int HANDLE_BR = 2;
     private static final int HANDLE_BL = 3;
-    private static final int COLOR_RED    = 0xFFFF2D2D;
-    private static final int COLOR_YELLOW = 0xFFFFD21E;
-    private static final int COLOR_GREEN  = 0xFF32DC6E;
+    // Warna RGB dilunakkan ~30% agar tidak terlalu terang/mencolok
+    private static final int COLOR_RED    = 0xFFB32020;
+    private static final int COLOR_YELLOW = 0xFFB39415;
+    private static final int COLOR_GREEN  = 0xFF239A4D;
 
     private static final float MIN_DRAG_DISTANCE_PX = 24f;
     private static final float MIN_RECT_SIZE_DP = 40f;
@@ -106,7 +107,7 @@ public class SelectionOverlayView extends View {
         segmentPaint.setStrokeCap(Paint.Cap.ROUND);
 
         glowPaint.setStyle(Paint.Style.STROKE);
-        glowPaint.setStrokeWidth(dp(9f));
+        glowPaint.setStrokeWidth(dp(11f));
         glowPaint.setStrokeJoin(Paint.Join.ROUND);
         glowPaint.setStrokeCap(Paint.Cap.ROUND);
 
@@ -183,7 +184,8 @@ public class SelectionOverlayView extends View {
         f = Math.max(0f, Math.min(1f, f));
         int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
         int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
-        return 0xFF000000
+        // Alpha ~0xC8 (~78%) supaya stroke RGB tidak terlalu pekat
+        return 0xC8000000
                 | ((int) (ar + (br - ar) * f) << 16)
                 | ((int) (ag + (bg - ag) * f) << 8)
                 | (int) (ab + (bb - ab) * f);
@@ -202,7 +204,7 @@ public class SelectionOverlayView extends View {
             float t = ((d / cycleLen) + colorPhase) % 1f;
             if (t < 0f) t += 1f;
             int color = colorAt(t);
-            glowPaint.setColor((color & 0x00FFFFFF) | 0x55000000);
+            glowPaint.setColor((color & 0x00FFFFFF) | 0x3C000000);
             canvas.drawPath(segmentPath, glowPaint);
             segmentPaint.setColor(color);
             canvas.drawPath(segmentPath, segmentPaint);

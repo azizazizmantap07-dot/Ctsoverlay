@@ -67,7 +67,7 @@ public class RainbowGlowView extends View {
         glowPaint.setStyle(Paint.Style.STROKE);
         glowPaint.setStrokeCap(Paint.Cap.ROUND);
         glowPaint.setStrokeJoin(Paint.Join.ROUND);
-        glowPaint.setStrokeWidth(dp(10));
+        glowPaint.setStrokeWidth(dp(12));
 
         corePaint.setStyle(Paint.Style.STROKE);
         corePaint.setStrokeCap(Paint.Cap.ROUND);
@@ -190,13 +190,13 @@ public class RainbowGlowView extends View {
 
         // Lapisan luar: glow blur lembut (lebar, transparan).
         glowPaint.setShader(makeShader(getWidth(), rainbow));
-        glowPaint.setAlpha((int) (140 * alpha));
+        glowPaint.setAlpha((int) (95 * alpha));
         canvas.drawPath(leftSegment, glowPaint);
         canvas.drawPath(rightSegment, glowPaint);
 
         // Lapisan inti: garis tipis lebih pekat di tengah glow.
         corePaint.setShader(makeShader(getWidth(), rainbow));
-        corePaint.setAlpha((int) (230 * alpha));
+        corePaint.setAlpha((int) (155 * alpha));
         canvas.drawPath(leftSegment, corePaint);
         canvas.drawPath(rightSegment, corePaint);
     }
@@ -210,8 +210,9 @@ public class RainbowGlowView extends View {
         int steps = 6;
         int[] colors = new int[steps];
         float[] hsv = new float[3];
-        hsv[1] = 1f;
-        hsv[2] = 1f;
+        // Saturasi & value dilunakkan ~30% agar RGB tidak menyilaukan
+        hsv[1] = 0.72f;
+        hsv[2] = 0.78f;
         for (int i = 0; i < steps; i++) {
             float hue = (shiftDeg + (360f / steps) * i) % 360f;
             hsv[0] = hue;
