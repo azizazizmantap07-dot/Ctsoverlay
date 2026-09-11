@@ -8,7 +8,9 @@ import com.google.android.gms.tasks.Task;
 import com.google.android.gms.tasks.Tasks;
 import com.google.mlkit.common.model.DownloadConditions;
 import com.google.mlkit.common.model.RemoteModelManager;
+import com.google.mlkit.nl.languageid.IdentifiedLanguage;
 import com.google.mlkit.nl.languageid.LanguageIdentification;
+import com.google.mlkit.nl.languageid.LanguageIdentificationOptions;
 import com.google.mlkit.nl.languageid.LanguageIdentifier;
 import com.google.mlkit.nl.translate.TranslateLanguage;
 import com.google.mlkit.nl.translate.TranslateRemoteModel;
@@ -106,10 +108,33 @@ public final class OcrTranslateHelper {
     /**
      * Blok OCR dengan tinggi kotak di bawah ini (dalam px bitmap sumber)
      * diabaikan saat membangun teks gabungan untuk DETEKSI BAHASA.
+     *
+     * DINAIKKAN dari 18 -> 26: pada mode "1 layar", nilai 18px terlalu
+     * longgar dan meloloskan elemen UI kecil (label ikon, badge notifikasi)
+     * yang bukan konten aplikasi sungguhan sebagai sinyal deteksi bahasa.
      */
-    private static final int MIN_BLOCK_HEIGHT_PX_FOR_LANG_DETECT = 18;
-    /** Blok dengan teks lebih pendek dari ini (setelah trim) juga dianggap noise untuk deteksi bahasa. */
-    private static final int MIN_BLOCK_CHARS_FOR_LANG_DETECT = 2;
+    private static final int MIN_BLOCK_HEIGHT_PX_FOR_LANG_DETECT = 26;
+    /**
+     * Blok dengan teks lebih pendek dari ini (setelah trim) juga dianggap
+     * noise untuk deteksi bahasa.
+     *
+     * DINAIKKAN dari 2 -> 4: string sangat pendek (1-3 karakter) seperti
+     * jam ("12.34"), persentase baterai ("76"), atau ikon berlabel satu
+     * huruf nyaris tidak membawa sinyal bahasa yang berguna, tapi bisa
+     * mengotori hasil deteksi bila jumlahnya banyak.
+     */
+    private static final int MIN_BLOCK_CHARS_FOR_LANG_DETECT = 4;
+    /**
+     * Ambang confidence untuk {@link LanguageIdentifier}, DITURUNKAN dari
+     * default 0.5 menjadi 0.35. Screenshot "1 layar" hampir selalu berisi
+     * campuran teks aplikasi + elemen UI sistem (jam, status bar, watermark
+     * wallpaper, dsb), yang membuat confidence deteksi bahasa gabungan
+     * secara alami lebih rendah dibanding teks bersih hasil seleksi lasso.
+     * Ambang default 0.5 terlalu mudah menghasilkan "und" (tidak
+     * terdeteksi) pada kasus ini, yang membuat translate dilewati sama
+     * sekali meski sebenarnya teksnya jelas satu bahasa.
+     */
+    private static final float LANGUAGE_CONFIDENCE_THRESHOLD = 0.35f;
 
     private static final AtomicLong requestGeneration = new AtomicLong(0);
 
@@ -221,18 +246,52 @@ public final class OcrTranslateHelper {
         List<Text.TextBlock> blocksForLangDetect =
                 significantForDetection.isEmpty() ? textBlocks : significantForDetection;
 
+        // Urutkan dari teks TERPANJANG ke terpendek sebelum digabung.
+        // Pada mode "1 layar" jumlah blok kecil (label ikon, sisa noise
+        // yang lolos filter) bisa jauh lebih banyak daripada blok konten
+        // sungguhan; menggabung apa adanya (urutan posisi di layar)
+        // membiarkan blok-blok kecil itu mendominasi porsi string yang
+        // dikirim ke language identifier. Mendahulukan blok terpanjang
+        // memastikan konten sungguhan yang paling menentukan hasil deteksi.
+        //
+        // PENTING: identifyLanguage()/identifyPossibleLanguages() ML Kit
+        // memotong input yang lebih dari 200 karakter dan HANYA memakai
+        // 200 karakter PERTAMA dari string yang dikirim. Tanpa pengurutan
+        // ini, pada layar berisi banyak teks (mis. artikel panjang), 200
+        // karakter pertama yang benar-benar dipakai untuk deteksi bisa
+        // saja seluruhnya berasal dari blok kecil/noise di awal urutan
+        // posisi layar — sementara konten sungguhan yang panjang tidak
+        // pernah "terlihat" oleh detektor sama sekali. Mengurutkan blok
+        // terpanjang ke depan memastikan 200 karakter yang dipakai ML Kit
+        // berasal dari konten yang benar-benar relevan.
+        List<Text.TextBlock> sortedForDetect = new ArrayList<>(blocksForLangDetect);
+        Collections.sort(sortedForDetect, (a, b) ->
+                Integer.compare(b.getText().trim().length(), a.getText().trim().length()));
+
         StringBuilder combined = new StringBuilder();
-        for (Text.TextBlock block : blocksForLangDetect) {
+        for (Text.TextBlock block : sortedForDetect) {
             combined.append(block.getText()).append("\n");
         }
 
-        LanguageIdentifier identifier = LanguageIdentification.getClient();
+        LanguageIdentificationOptions options = new LanguageIdentificationOptions.Builder()
+                .setConfidenceThreshold(LANGUAGE_CONFIDENCE_THRESHOLD)
+                .build();
+        LanguageIdentifier identifier = LanguageIdentification.getClient(options);
         identifier.identifyLanguage(combined.toString())
                 .addOnSuccessListener(languageCode -> {
                     if (!isCurrent(generation)) return;
-                    Log.d(TAG, "Bahasa terdeteksi: " + languageCode);
+                    Log.d(TAG, "Bahasa terdeteksi (gabungan): " + languageCode);
 
-                    if ("und".equals(languageCode) || TARGET_LANGUAGE.equals(languageCode)) {
+                    if ("und".equals(languageCode)) {
+                        // Fallback: gabungan gagal (campuran macam-macam
+                        // elemen UI menurunkan confidence di bawah ambang).
+                        // Coba lagi HANYA pada blok teks terpanjang sendirian
+                        // — teks tunggal yang lebih "bersih" tanpa campuran
+                        // sering kali cukup untuk lolos ambang confidence.
+                        detectLanguageFromLongestBlockFallback(sortedForDetect, textBlocks, callback, generation);
+                        return;
+                    }
+                    if (TARGET_LANGUAGE.equals(languageCode)) {
                         callback.onSuccess(toUntranslatedBlocks(textBlocks));
                         return;
                     }
@@ -246,17 +305,101 @@ public final class OcrTranslateHelper {
                 });
     }
 
+    /**
+     * Fallback saat deteksi bahasa dari string gabungan menghasilkan "und".
+     * Coba identifyPossibleLanguages pada blok teks TERPANJANG saja (paling
+     * mungkin konten aplikasi sungguhan, bukan noise UI), ambil kandidat
+     * dengan confidence tertinggi. Jika tetap tidak ada kandidat yang lolos
+     * ambang, baru benar-benar menyerah dan tampilkan teks asli.
+     */
+    private static void detectLanguageFromLongestBlockFallback(
+            List<Text.TextBlock> sortedForDetect, List<Text.TextBlock> allBlocks,
+            ResultCallback callback, long generation) {
+        if (sortedForDetect.isEmpty()) {
+            callback.onSuccess(toUntranslatedBlocks(allBlocks));
+            return;
+        }
+        String longestText = sortedForDetect.get(0).getText().trim();
+        if (longestText.isEmpty()) {
+            callback.onSuccess(toUntranslatedBlocks(allBlocks));
+            return;
+        }
+
+        LanguageIdentificationOptions options = new LanguageIdentificationOptions.Builder()
+                .setConfidenceThreshold(LANGUAGE_CONFIDENCE_THRESHOLD)
+                .build();
+        LanguageIdentifier identifier = LanguageIdentification.getClient(options);
+        identifier.identifyPossibleLanguages(longestText)
+                .addOnSuccessListener(candidates -> {
+                    if (!isCurrent(generation)) return;
+
+                    String best = null;
+                    float bestConfidence = 0f;
+                    for (IdentifiedLanguage candidate : candidates) {
+                        String code = candidate.getLanguageTag();
+                        if ("und".equals(code)) continue;
+                        if (candidate.getConfidence() > bestConfidence) {
+                            bestConfidence = candidate.getConfidence();
+                            best = code;
+                        }
+                    }
+
+                    if (best == null) {
+                        Log.d(TAG, "Fallback deteksi bahasa juga gagal, tampilkan teks asli");
+                        callback.onSuccess(toUntranslatedBlocks(allBlocks));
+                        return;
+                    }
+                    Log.d(TAG, "Bahasa terdeteksi (fallback blok terpanjang): "
+                            + best + " (confidence=" + bestConfidence + ")");
+
+                    if (TARGET_LANGUAGE.equals(best)) {
+                        callback.onSuccess(toUntranslatedBlocks(allBlocks));
+                        return;
+                    }
+                    translateBlocksIfModelAvailable(allBlocks, best, callback, generation);
+                })
+                .addOnFailureListener(e -> {
+                    if (!isCurrent(generation)) return;
+                    Log.e(TAG, "Fallback deteksi bahasa gagal (exception), tampilkan teks asli", e);
+                    callback.onSuccess(toUntranslatedBlocks(allBlocks));
+                });
+    }
+
     private static List<Text.TextBlock> filterSignificantBlocks(List<Text.TextBlock> textBlocks) {
         List<Text.TextBlock> result = new ArrayList<>();
         for (Text.TextBlock block : textBlocks) {
             Rect box = block.getBoundingBox();
             String text = block.getText();
             if (box == null || text == null) continue;
+            String trimmed = text.trim();
             if (box.height() < MIN_BLOCK_HEIGHT_PX_FOR_LANG_DETECT) continue;
-            if (text.trim().length() < MIN_BLOCK_CHARS_FOR_LANG_DETECT) continue;
+            if (trimmed.length() < MIN_BLOCK_CHARS_FOR_LANG_DETECT) continue;
+            if (isMostlyNonAlphabetic(trimmed)) continue;
             result.add(block);
         }
         return result;
+    }
+
+    /**
+     * True bila blok teks sebagian besar terdiri dari digit/simbol/spasi
+     * (mis. jam "12.34", tanggal, persentase baterai "76%", nomor urut).
+     * Blok semacam ini nyaris tidak membawa sinyal bahasa dan sering
+     * berasal dari elemen UI sistem (status bar, jam) bukan konten
+     * aplikasi — harus disingkirkan dari deteksi bahasa mode "1 layar"
+     * supaya tidak mengotori hasil deteksi.
+     */
+    private static boolean isMostlyNonAlphabetic(String text) {
+        int letters = 0;
+        int total = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isWhitespace(c)) continue;
+            total++;
+            if (Character.isLetter(c)) letters++;
+        }
+        if (total == 0) return true;
+        // Kurang dari separuh karakter (non-spasi) berupa huruf -> anggap noise.
+        return letters < total / 2.0;
     }
 
     private static List<TranslatedBlock> toUntranslatedBlocks(List<Text.TextBlock> textBlocks) {
