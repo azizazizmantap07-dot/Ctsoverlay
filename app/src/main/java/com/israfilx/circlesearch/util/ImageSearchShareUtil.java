@@ -90,10 +90,10 @@ public final class ImageSearchShareUtil {
         Intent intent = new Intent(context, com.israfilx.circlesearch.ui.ImageSearchWebActivity.class);
         intent.putExtra(com.israfilx.circlesearch.ui.ImageSearchWebActivity.EXTRA_IMAGE_URI,
                 contentUri.toString());
+        // NEW_TASK + affinity kosong (lihat Manifest) → task terpisah dari
+        // MainActivity CTS. Saat WebView ditutup (finishAndRemoveTask),
+        // user kembali ke app yang tadi di-overlay, bukan ke CTS.
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        // Grant read permission agar WebView (process yang sama, tapi
-        // FileProvider tetap butuh grant eksplisit di beberapa OEM) bisa
-        // membaca content:// Uri saat onShowFileChooser.
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
             context.startActivity(intent);

@@ -6,6 +6,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -35,9 +36,11 @@ import java.util.concurrent.Executors;
  * Alur (mengikuti AKS-Labs/CircleToSearch):
  *  1. Terima content:// Uri gambar crop.
  *  2. Upload ke Litterbox (1 jam) / Catbox → dapat URL publik.
- *  3. Bangun URL mesin pencari yang sudah berisi parameter image URL
- *     (Yandex / Bing / Google Lens / TinEye).
- *  4. Load URL itu di WebView → hasil langsung tampil, tanpa file chooser.
+ *  3. Bangun URL mesin pencari (prioritas: Google Lens, lalu Bing).
+ *  4. Load URL di WebView → hasil langsung tampil.
+ *
+ * Saat ditutup, activity di-remove dari task stack (finishAndRemoveTask)
+ * supaya user kembali ke app yang tadi di-overlay, bukan ke MainActivity CTS.
  */
 public class ImageSearchWebActivity extends Activity {
 
@@ -48,13 +51,10 @@ public class ImageSearchWebActivity extends Activity {
     private WebView webView;
     private ProgressBar progressBar;
     private TextView statusText;
-    private TextView btnYandex;
+    private TextView btnLens;
     private TextView btnBing;
-    private TextView btnGoogle;
-    private TextView btnTinEye;
 
     private String publicImageUrl;
-    private String currentEngine = "yandex";
     private Bitmap sourceBitmap;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -67,7 +67,7 @@ public class ImageSearchWebActivity extends Activity {
         String uriStr = getIntent() != null ? getIntent().getStringExtra(EXTRA_IMAGE_URI) : null;
         if (uriStr == null || uriStr.isEmpty()) {
             Toast.makeText(this, "Gambar tidak ditemukan", Toast.LENGTH_SHORT).show();
-            finish();
+            closeAndReturn();
             return;
         }
 
@@ -117,6 +117,7 @@ public class ImageSearchWebActivity extends Activity {
 
             String uploaded = ImageSearchUploader.uploadToImageHost(bmp);
             mainHandler.post(() -> {
+                if (isFinishing()) return;
                 if (uploaded == null) {
                     statusText.setText("Gagal mengunggah gambar.\nPeriksa koneksi internet lalu coba lagi.");
                     Toast.makeText(this, "Upload gagal", Toast.LENGTH_LONG).show();
@@ -125,7 +126,8 @@ public class ImageSearchWebActivity extends Activity {
                 publicImageUrl = uploaded;
                 statusText.setVisibility(View.GONE);
                 webView.setVisibility(View.VISIBLE);
-                loadEngine("yandex");
+                // Prioritas utama: Google Lens
+                loadEngine("google");
             });
         });
     }
@@ -147,29 +149,21 @@ public class ImageSearchWebActivity extends Activity {
         bar.setPadding(dp(6), dp(8), dp(6), dp(8));
         bar.setBackgroundColor(Color.parseColor("#1D2029"));
 
-        TextView btnClose = makeChip("✕", true);
-        btnClose.setOnClickListener(v -> finish());
+        TextView btnClose = makeChip("✕  Tutup", true);
+        btnClose.setOnClickListener(v -> closeAndReturn());
         bar.addView(btnClose);
 
         View spacer = new View(this);
         spacer.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
         bar.addView(spacer);
 
-        btnYandex = makeChip("Yandex", false);
-        btnYandex.setOnClickListener(v -> loadEngine("yandex"));
-        bar.addView(btnYandex);
+        btnLens = makeChip("Google Lens", false);
+        btnLens.setOnClickListener(v -> loadEngine("google"));
+        bar.addView(btnLens);
 
         btnBing = makeChip("Bing", false);
         btnBing.setOnClickListener(v -> loadEngine("bing"));
         bar.addView(btnBing);
-
-        btnGoogle = makeChip("Lens", false);
-        btnGoogle.setOnClickListener(v -> loadEngine("google"));
-        bar.addView(btnGoogle);
-
-        btnTinEye = makeChip("TinEye", false);
-        btnTinEye.setOnClickListener(v -> loadEngine("tineye"));
-        bar.addView(btnTinEye);
 
         return bar;
     }
@@ -191,20 +185,15 @@ public class ImageSearchWebActivity extends Activity {
     }
 
     private void highlightEngine(String engine) {
-        currentEngine = engine;
         int activeBg = Color.parseColor("#3A5A40");
         int inactiveBg = Color.parseColor("#2A2E3C");
         int activeText = Color.parseColor("#A8E6A0");
         int inactiveText = Color.parseColor("#C8CBD8");
 
-        btnYandex.setBackgroundColor("yandex".equals(engine) ? activeBg : inactiveBg);
-        btnYandex.setTextColor("yandex".equals(engine) ? activeText : inactiveText);
+        btnLens.setBackgroundColor("google".equals(engine) ? activeBg : inactiveBg);
+        btnLens.setTextColor("google".equals(engine) ? activeText : inactiveText);
         btnBing.setBackgroundColor("bing".equals(engine) ? activeBg : inactiveBg);
         btnBing.setTextColor("bing".equals(engine) ? activeText : inactiveText);
-        btnGoogle.setBackgroundColor("google".equals(engine) ? activeBg : inactiveBg);
-        btnGoogle.setTextColor("google".equals(engine) ? activeText : inactiveText);
-        btnTinEye.setBackgroundColor("tineye".equals(engine) ? activeBg : inactiveBg);
-        btnTinEye.setTextColor("tineye".equals(engine) ? activeText : inactiveText);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -253,26 +242,30 @@ public class ImageSearchWebActivity extends Activity {
         highlightEngine(engine);
 
         String url;
-        switch (engine) {
-            case "bing":
-                url = ImageSearchUploader.getBingUrl(publicImageUrl);
-                break;
-            case "google":
-                url = ImageSearchUploader.getGoogleLensUrl(publicImageUrl);
-                break;
-            case "tineye":
-                url = ImageSearchUploader.getTinEyeUrl(publicImageUrl);
-                break;
-            case "yandex":
-            default:
-                url = ImageSearchUploader.getYandexUrl(publicImageUrl);
-                break;
+        if ("bing".equals(engine)) {
+            url = ImageSearchUploader.getBingUrl(publicImageUrl);
+        } else {
+            // Default & prioritas utama: Google Lens
+            url = ImageSearchUploader.getGoogleLensUrl(publicImageUrl);
         }
 
-        Log.d(TAG, "Load search URL: " + url);
+        Log.d(TAG, "Load search URL (" + engine + "): " + url);
         progressBar.setVisibility(View.VISIBLE);
         progressBar.setProgress(0);
         webView.loadUrl(url);
+    }
+
+    /**
+     * Tutup activity dan buang dari task stack supaya user kembali ke
+     * app yang sedang terbuka saat overlay dipicu — bukan ke MainActivity
+     * Circle Search Overlay.
+     */
+    private void closeAndReturn() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            finishAndRemoveTask();
+        } else {
+            finish();
+        }
     }
 
     @Override
@@ -280,7 +273,7 @@ public class ImageSearchWebActivity extends Activity {
         if (webView != null && webView.canGoBack()) {
             webView.goBack();
         } else {
-            super.onBackPressed();
+            closeAndReturn();
         }
     }
 
