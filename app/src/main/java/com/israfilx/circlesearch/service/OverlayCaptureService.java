@@ -65,8 +65,9 @@ import java.util.List;
  *  5. Aksi "Salin Teks" -> OCR saja (tanpa translate), hasilnya langsung
  *     disalin ke clipboard tanpa menampilkan overlay tambahan.
  *  6. Aksi "Cari" -> kirim bitmap (crop atau full) untuk pencarian visual
- *     via ImageSearchShareUtil (urutan preferensi: Yandex, Bing, lalu
- *     Google Lens sebagai prioritas terakhir, baru chooser umum).
+ *     via ImageSearchShareUtil. Default: buka WebView in-app
+ *     (ImageSearchWebActivity). Bisa diganti ke mode eksternal (Yandex →
+ *     Bing → Google Lens → chooser) lewat pengaturan di MainActivity.
  *
  * NAVIGASI "BACK BERTAHAP": overlay ini punya dua "layar" konseptual —
  * MENU UTAMA (seleksi + BottomIconMenu) dan HASIL TERJEMAHAN

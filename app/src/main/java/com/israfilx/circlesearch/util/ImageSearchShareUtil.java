@@ -14,32 +14,35 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 
 /**
- * Simpan bitmap hasil crop ke cache internal, lalu kirim via
- * Intent.ACTION_SEND untuk pencarian visual (cari gambar mirip/cari info
- * dari gambar).
+ * Simpan bitmap hasil crop ke cache internal, lalu:
+ *  A) Buka di WebView in-app (ImageSearchWebActivity) bila opsi
+ *     "Pencarian visual di dalam aplikasi" aktif, ATAU
+ *  B) Kirim via Intent.ACTION_SEND ke app eksternal.
  *
- * Urutan preferensi (dari yang paling diutamakan ke paling akhir):
- *  1. App Yandex (Yandex Search atau Yandex Browser) bila terpasang —
- *     mesin pencari non-Google dengan reverse image search yang kuat.
- *  2. App Bing / Microsoft Start bila terpasang — alternatif non-Google
- *     kedua.
- *  3. Google Lens / app Google (jika terpasang) — dikembalikan sebagai
- *     pilihan, TAPI sengaja diberi prioritas PALING BAWAH di antara
- *     opsi bertarget spesifik, dicoba hanya setelah Yandex dan Bing
- *     tidak tersedia/tidak terpasang.
- *  4. Chooser (pemilih aplikasi) BAWAAN ANDROID tanpa target spesifik —
- *     murni daftar semua app yang bisa menerima gambar, dan user sendiri
- *     yang memilih. Fallback paling netral bila tidak ada app spesifik
- *     di atas yang terpasang.
+ * Mode eksternal — urutan preferensi (dari yang paling diutamakan):
+ *  1. App Yandex (Yandex Search atau Yandex Browser) bila terpasang.
+ *  2. App Bing / Microsoft Start bila terpasang.
+ *  3. Google Lens / app Google (prioritas paling bawah di antara opsi
+ *     bertarget spesifik).
+ *  4. Chooser bawaan Android tanpa target spesifik.
  *
- * Catatan privasi: keputusan app tujuan mana yang akhirnya dipakai tetap
- * di tangan user lewat chooser sistem — util ini hanya menentukan URUTAN
- * mana yang dicoba lebih dulu bila lebih dari satu app spesifik terpasang
- * bersamaan, bukan memaksa satu layanan tertentu.
+ * Preferensi mode (in-app WebView vs eksternal) disimpan di
+ * SharedPreferences "circlesearch_prefs" key
+ * {@link #KEY_VISUAL_SEARCH_IN_WEBVIEW} (default: true).
  */
 public final class ImageSearchShareUtil {
 
     private static final String TAG = "CircleSearch/ImageShare";
+
+    /** Nama SharedPreferences untuk opsi pencarian visual. */
+    public static final String PREFS_NAME = "circlesearch_prefs";
+
+    /**
+     * Key boolean: true = buka ImageSearchWebActivity (WebView in-app),
+     * false = share Intent ke app eksternal (perilaku lama).
+     * Default true.
+     */
+    public static final String KEY_VISUAL_SEARCH_IN_WEBVIEW = "visual_search_in_webview";
 
     // Package name resmi Yandex Search (punya fitur "Cari lewat gambar"
     // terintegrasi) dan Yandex Browser (juga menerima share gambar untuk
@@ -62,9 +65,51 @@ public final class ImageSearchShareUtil {
     private ImageSearchShareUtil() {}
 
     /**
-     * @return true bila intent berhasil dikirim (activity ditemukan)
+     * Entry point utama. Membaca preferensi user lalu memilih jalur
+     * in-app WebView atau share Intent eksternal.
+     *
+     * @return true bila intent/activity berhasil diluncurkan
      */
     public static boolean shareForVisualSearch(Context context, Bitmap cropped) {
+        boolean useWebView = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_VISUAL_SEARCH_IN_WEBVIEW, true);
+
+        if (useWebView) {
+            return openInAppWebView(context, cropped);
+        }
+        return shareToExternalApp(context, cropped);
+    }
+
+    /**
+     * Buka ImageSearchWebActivity dengan Uri gambar yang sudah di-cache.
+     */
+    public static boolean openInAppWebView(Context context, Bitmap cropped) {
+        Uri contentUri = saveToCacheAndGetUri(context, cropped);
+        if (contentUri == null) return false;
+
+        Intent intent = new Intent(context, com.israfilx.circlesearch.ui.ImageSearchWebActivity.class);
+        intent.putExtra(com.israfilx.circlesearch.ui.ImageSearchWebActivity.EXTRA_IMAGE_URI,
+                contentUri.toString());
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        // Grant read permission agar WebView (process yang sama, tapi
+        // FileProvider tetap butuh grant eksplisit di beberapa OEM) bisa
+        // membaca content:// Uri saat onShowFileChooser.
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            context.startActivity(intent);
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Gagal membuka ImageSearchWebActivity", e);
+            return false;
+        }
+    }
+
+    /**
+     * Perilaku lama: share Intent ke Yandex / Bing / Google Lens / chooser.
+     *
+     * @return true bila intent berhasil dikirim (activity ditemukan)
+     */
+    public static boolean shareToExternalApp(Context context, Bitmap cropped) {
         Uri contentUri = saveToCacheAndGetUri(context, cropped);
         if (contentUri == null) return false;
 
@@ -127,7 +172,11 @@ public final class ImageSearchShareUtil {
         return sendIntent;
     }
 
-    private static Uri saveToCacheAndGetUri(Context context, Bitmap bitmap) {
+    /**
+     * Simpan bitmap ke cache internal dan kembalikan content:// Uri
+     * lewat FileProvider. Dipakai baik oleh jalur WebView maupun Intent.
+     */
+    public static Uri saveToCacheAndGetUri(Context context, Bitmap bitmap) {
         File cacheDir = new File(context.getCacheDir(), "circlesearch_shares");
         if (!cacheDir.exists()) cacheDir.mkdirs();
 

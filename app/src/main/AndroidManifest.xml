@@ -82,6 +82,18 @@
         </activity>
 
         <!--
+            WebView in-app untuk reverse image search (Yandex / Bing / Google).
+            Dibuka dari OverlayCaptureService saat opsi
+            "Pencarian visual di dalam aplikasi" aktif.
+        -->
+        <activity
+            android:name=".ui.ImageSearchWebActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:hardwareAccelerated="true" />
+
+        <!--
             WAJIB untuk lolos syarat RoleManager android.app.role.ASSISTANT.
             Tanpa activity ACTION_ASSIST ini, VoiceInteractionService saja
             tidak cukup — app tidak akan muncul di daftar pilihan Settings

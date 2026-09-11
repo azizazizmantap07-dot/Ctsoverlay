@@ -4,6 +4,7 @@ import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.content.Context;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.animation.DecelerateInterpolator;
@@ -21,6 +22,9 @@ import android.widget.TextView;
  *    screenshot, tanpa perlu menyeleksi dulu.
  *  - Mode lasso: muncul (di posisi bawah yang sama) setelah user selesai
  *    melingkari area tertentu, aksinya berlaku untuk area yang dilingkari.
+ *
+ * Setiap ikon dilengkapi label teks di bawahnya (cari / translate / salin /
+ * tutup) agar fungsi masing-masing jelas tanpa mengandalkan tebakan glyph.
  *
  * Ikon ✕ SENGAJA ditambahkan sebagai jalan keluar eksplisit yang selalu
  * bisa ditekan, terlepas dari overlay lain apa yang sedang tampil di
@@ -73,44 +77,44 @@ public class BottomIconMenu extends LinearLayout {
         bg.setCornerRadius(dp(40));
         setBackground(bg);
 
-        int padH = (int) dp(16);
-        int padV = (int) dp(10);
+        int padH = (int) dp(14);
+        int padV = (int) dp(8);
         setPadding(padH, padV, padH, padV);
         setElevation(dp(8));
 
-        TextView searchIcon = makeIconButton("🔍");
-        searchIcon.setOnClickListener(v -> {
+        LinearLayout searchBtn = makeLabeledButton("🔍", "cari");
+        searchBtn.setOnClickListener(v -> {
             if (listener != null) listener.onSearchVisual();
         });
-        addView(searchIcon);
+        addView(searchBtn);
 
         addView(spacer());
 
-        TextView translateIcon = makeIconButton("🌐");
-        translateIcon.setOnClickListener(v -> {
+        LinearLayout translateBtn = makeLabeledButton("🌐", "translate");
+        translateBtn.setOnClickListener(v -> {
             if (listener != null) listener.onTranslate();
         });
-        addView(translateIcon);
+        addView(translateBtn);
 
         addView(spacer());
 
         // Salin teks (OCR murni, tanpa translate) — berguna saat user
         // hanya ingin menyalin teks yang ada pada gambar apa adanya.
-        TextView copyTextIcon = makeIconButton("📋");
-        copyTextIcon.setOnClickListener(v -> {
+        LinearLayout copyBtn = makeLabeledButton("📋", "salin");
+        copyBtn.setOnClickListener(v -> {
             if (listener != null) listener.onCopyText();
         });
-        addView(copyTextIcon);
+        addView(copyBtn);
 
         addView(spacer());
 
         // Tombol tutup eksplisit — selalu ada, selalu berfungsi, tidak
         // bergantung pada tap-di-luar-area yang bisa nyasar ke view lain.
-        TextView closeIcon = makeIconButton("✕");
-        closeIcon.setOnClickListener(v -> {
+        LinearLayout closeBtn = makeLabeledButton("✕", "tutup");
+        closeBtn.setOnClickListener(v -> {
             if (listener != null) listener.onClose();
         });
-        addView(closeIcon);
+        addView(closeBtn);
 
         // Animasi masuk halus (fade + slide-up sedikit) supaya kemunculan
         // menu tidak terasa "muncul tiba-tiba" (snap) — hanya diputar pada
@@ -128,28 +132,60 @@ public class BottomIconMenu extends LinearLayout {
         }
     }
 
-    private TextView makeIconButton(String glyph) {
-        TextView tv = new TextView(getContext());
-        tv.setText(glyph);
-        tv.setTextSize(22);
-        tv.setGravity(Gravity.CENTER);
-        int size = (int) dp(44);
-        LayoutParams lp = new LayoutParams(size, size);
-        tv.setLayoutParams(lp);
+    /**
+     * Satu tombol = ikon di atas + label teks kecil di bawah, dalam
+     * LinearLayout vertikal yang bisa diklik utuh.
+     */
+    private LinearLayout makeLabeledButton(String glyph, String label) {
+        LinearLayout col = new LinearLayout(getContext());
+        col.setOrientation(VERTICAL);
+        col.setGravity(Gravity.CENTER_HORIZONTAL);
+        col.setClickable(true);
+        col.setFocusable(true);
+
+        // Area sentuh minimal ~48dp lebar supaya nyaman ditekan
+        int minW = (int) dp(52);
+        LayoutParams colLp = new LayoutParams(minW, LayoutParams.WRAP_CONTENT);
+        col.setLayoutParams(colLp);
+
+        // Ikon bulat
+        TextView icon = new TextView(getContext());
+        icon.setText(glyph);
+        icon.setTextSize(20);
+        icon.setGravity(Gravity.CENTER);
+        int iconSize = (int) dp(40);
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(iconSize, iconSize);
+        icon.setLayoutParams(iconLp);
 
         GradientDrawable circleBg = new GradientDrawable();
         circleBg.setShape(GradientDrawable.OVAL);
         circleBg.setColor(Color.parseColor("#33FFFFFF"));
-        tv.setBackground(circleBg);
+        icon.setBackground(circleBg);
+        // Jangan biarkan TextView ikon menyerap klik sendiri — biarkan parent
+        icon.setClickable(false);
+        icon.setFocusable(false);
 
-        tv.setClickable(true);
-        tv.setFocusable(true);
-        return tv;
+        col.addView(icon);
+
+        // Label di bawah ikon
+        TextView caption = new TextView(getContext());
+        caption.setText(label);
+        caption.setTextSize(10);
+        caption.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+        caption.setTextColor(Color.parseColor("#E8EAF0"));
+        caption.setGravity(Gravity.CENTER);
+        caption.setPadding(0, (int) dp(3), 0, 0);
+        caption.setMaxLines(1);
+        caption.setClickable(false);
+        caption.setFocusable(false);
+        col.addView(caption);
+
+        return col;
     }
 
     private android.view.View spacer() {
         android.view.View v = new android.view.View(getContext());
-        LayoutParams lp = new LayoutParams((int) dp(20), 1);
+        LayoutParams lp = new LayoutParams((int) dp(10), 1);
         v.setLayoutParams(lp);
         return v;
     }

@@ -185,6 +185,37 @@ public class MainActivity extends Activity {
         root.addView(btnSetAssistantRoot);
 
         // ============================================================
+        // PENCARIAN VISUAL
+        // ============================================================
+        root.addView(sectionHeader("Pencarian visual"));
+
+        root.addView(bodyText(
+                "Pilih cara menampilkan hasil \"Cari gambar\". Mode WebView "
+                        + "membuka hasil di dalam aplikasi (Yandex / Bing / Google) "
+                        + "sehingga terasa menyatu. Mode eksternal melempar ke "
+                        + "aplikasi pencarian yang terpasang (perilaku lama)."));
+
+        final TextView statusVisualSearch = statusText();
+        root.addView(statusVisualSearch);
+
+        Button btnToggleVisualSearch = actionButton("Ganti mode pencarian visual");
+        btnToggleVisualSearch.setOnClickListener(v -> {
+            SharedPreferences prefs = getSharedPreferences(
+                    com.israfilx.circlesearch.util.ImageSearchShareUtil.PREFS_NAME, MODE_PRIVATE);
+            boolean current = prefs.getBoolean(
+                    com.israfilx.circlesearch.util.ImageSearchShareUtil.KEY_VISUAL_SEARCH_IN_WEBVIEW, true);
+            boolean next = !current;
+            prefs.edit().putBoolean(
+                    com.israfilx.circlesearch.util.ImageSearchShareUtil.KEY_VISUAL_SEARCH_IN_WEBVIEW, next).apply();
+            updateVisualSearchStatus(statusVisualSearch);
+            Toast.makeText(this,
+                    next ? "Mode: di dalam aplikasi (WebView)" : "Mode: aplikasi eksternal",
+                    Toast.LENGTH_SHORT).show();
+        });
+        root.addView(btnToggleVisualSearch);
+        updateVisualSearchStatus(statusVisualSearch);
+
+        // ============================================================
         // MENU BAHASA
         // ============================================================
         root.addView(sectionHeader("Menu bahasa"));
@@ -702,6 +733,22 @@ public class MainActivity extends Activity {
     // ----------------------------------------------------------------
     // Helper UI
     // ----------------------------------------------------------------
+
+    private void updateVisualSearchStatus(TextView statusView) {
+        if (statusView == null) return;
+        boolean inWebView = getSharedPreferences(
+                com.israfilx.circlesearch.util.ImageSearchShareUtil.PREFS_NAME, MODE_PRIVATE)
+                .getBoolean(com.israfilx.circlesearch.util.ImageSearchShareUtil.KEY_VISUAL_SEARCH_IN_WEBVIEW, true);
+        if (inWebView) {
+            statusView.setText("✓ Saat ini: di dalam aplikasi (WebView)\n"
+                    + "Hasil pencarian gambar tampil di WebView milik app ini.");
+            statusView.setTextColor(Color.parseColor(STATUS_OK));
+        } else {
+            statusView.setText("○ Saat ini: aplikasi eksternal\n"
+                    + "Gambar dikirim ke Yandex / Bing / Google Lens / chooser.");
+            statusView.setTextColor(Color.parseColor(STATUS_NEUTRAL));
+        }
+    }
 
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density);
