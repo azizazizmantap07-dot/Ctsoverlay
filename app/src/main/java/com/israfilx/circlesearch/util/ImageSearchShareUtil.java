@@ -69,9 +69,13 @@ public final class ImageSearchShareUtil {
         File cacheDir = new File(context.getCacheDir(), "circlesearch_shares");
         if (!cacheDir.exists()) cacheDir.mkdirs();
 
-        File imageFile = new File(cacheDir, "crop_" + System.currentTimeMillis() + ".png");
+        // JPEG lebih kecil/cepat dibaca dibanding PNG 100% — upload host juga JPEG.
+        File imageFile = new File(cacheDir, "crop_" + System.currentTimeMillis() + ".jpg");
         try (FileOutputStream out = new FileOutputStream(imageFile)) {
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)) {
+                Log.e(TAG, "Gagal compress JPEG crop");
+                return null;
+            }
         } catch (IOException e) {
             Log.e(TAG, "Gagal menyimpan bitmap crop ke cache", e);
             return null;

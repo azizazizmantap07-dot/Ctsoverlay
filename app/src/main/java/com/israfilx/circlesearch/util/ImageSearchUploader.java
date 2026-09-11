@@ -11,14 +11,18 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
- * Upload bitmap ke host sementara (Litterbox 1 jam, fallback Catbox),
- * lalu bangun URL reverse-image-search yang langsung menampilkan hasil.
- *
- * Pola sama seperti AKS-Labs/CircleToSearch: mesin pencari menerima
- * parameter {@code url=} / {@code image_url=} yang menunjuk ke gambar
- * publik, sehingga WebView tidak perlu file-chooser manual.
+ * Upload bitmap ke host sementara (Litterbox / Catbox) secara paralel —
+ * host mana yang lebih dulu sukses dipakai. Gambar di-resize + JPEG agar
+ * payload kecil dan upload lebih cepat.
  */
 public final class ImageSearchUploader {
 
@@ -26,34 +30,100 @@ public final class ImageSearchUploader {
     private static final String USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
                     + "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
-    private static final int TIMEOUT_MS = 30_000;
-    private static final int MAX_SIDE_PX = 1280;
-    private static final int JPEG_QUALITY = 90;
+
+    /** Connect cepat gagal → host lain bisa menang. */
+    private static final int CONNECT_TIMEOUT_MS = 8_000;
+    private static final int READ_TIMEOUT_MS = 18_000;
+    /** Batas total race (kedua host). */
+    private static final int RACE_TIMEOUT_MS = 22_000;
+
+    /** Sisi terpanjang — cukup untuk reverse search, file jauh lebih kecil. */
+    private static final int MAX_SIDE_PX = 960;
+    private static final int JPEG_QUALITY = 72;
 
     private ImageSearchUploader() {}
 
     /**
-     * Upload ke Litterbox (kadaluarsa 1 jam). Jika gagal, coba Catbox.
-     * @return URL publik gambar, atau null jika keduanya gagal
+     * Compress sekali, lalu race Litterbox + Catbox. Return URL publik
+     * host yang lebih dulu sukses, atau null jika keduanya gagal.
      */
     public static String uploadToImageHost(Bitmap bitmap) {
-        String url = uploadToLitterbox(bitmap);
-        if (url != null && url.startsWith("http")) {
-            Log.d(TAG, "Uploaded to Litterbox (1h): " + url);
-            return url.trim();
+        byte[] imageBytes = compress(bitmap);
+        if (imageBytes == null || imageBytes.length == 0) {
+            Log.e(TAG, "Compress gagal / bitmap kosong");
+            return null;
         }
-        Log.w(TAG, "Litterbox failed, trying Catbox…");
-        url = uploadToCatbox(bitmap);
-        if (url != null && url.startsWith("http")) {
-            Log.d(TAG, "Uploaded to Catbox: " + url);
-            return url.trim();
+        Log.d(TAG, "Payload JPEG " + imageBytes.length + " bytes (maxSide=" + MAX_SIDE_PX
+                + ", q=" + JPEG_QUALITY + ")");
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<String> litter = pool.submit(() -> uploadToLitterbox(imageBytes));
+            Future<String> catbox = pool.submit(() -> uploadToCatbox(imageBytes));
+
+            long deadline = System.nanoTime() + RACE_TIMEOUT_MS * 1_000_000L;
+            Future<String>[] futures = new Future[]{litter, catbox};
+            boolean[] done = new boolean[2];
+            int remaining = 2;
+
+            while (remaining > 0) {
+                long leftMs = (deadline - System.nanoTime()) / 1_000_000L;
+                if (leftMs <= 0) break;
+
+                for (int i = 0; i < futures.length; i++) {
+                    if (done[i]) continue;
+                    Future<String> f = futures[i];
+                    if (!f.isDone()) continue;
+                    done[i] = true;
+                    remaining--;
+                    try {
+                        String url = f.get();
+                        if (url != null && url.startsWith("http")) {
+                            // Batalkan yang belum selesai
+                            for (Future<String> other : futures) {
+                                if (other != f) other.cancel(true);
+                            }
+                            Log.d(TAG, "Upload menang: " + url);
+                            return url.trim();
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "Host race task gagal", e);
+                    }
+                }
+
+                // Poll singkat
+                try {
+                    Thread.sleep(40);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+
+            // Fallback: tunggu sedikit sisa yang belum done
+            for (int i = 0; i < futures.length; i++) {
+                if (done[i]) continue;
+                try {
+                    long leftMs = Math.max(200, (deadline - System.nanoTime()) / 1_000_000L);
+                    String url = futures[i].get(leftMs, TimeUnit.MILLISECONDS);
+                    if (url != null && url.startsWith("http")) {
+                        Log.d(TAG, "Upload (fallback wait): " + url);
+                        return url.trim();
+                    }
+                } catch (TimeoutException | ExecutionException | InterruptedException e) {
+                    futures[i].cancel(true);
+                }
+            }
+
+            Log.e(TAG, "Semua host upload gagal / timeout");
+            return null;
+        } finally {
+            pool.shutdownNow();
         }
-        Log.e(TAG, "Both Litterbox and Catbox uploads failed");
-        return null;
     }
 
     // ------------------------------------------------------------------
-    // URL builders (langsung ke halaman hasil reverse search)
+    // URL builders
     // ------------------------------------------------------------------
 
     public static String getYandexUrl(String imageUrl) {
@@ -68,7 +138,7 @@ public final class ImageSearchUploader {
         return "https://lens.google.com/uploadbyurl?url=" + enc(imageUrl);
     }
 
-    public static String getTinEyeUrl(String imageUrl) {
+    public static String getTineyeUrl(String imageUrl) {
         return "https://tineye.com/search?url=" + enc(imageUrl);
     }
 
@@ -81,16 +151,14 @@ public final class ImageSearchUploader {
     }
 
     // ------------------------------------------------------------------
-    // Upload implementations
+    // Upload implementations (byte[] sudah di-compress)
     // ------------------------------------------------------------------
 
-    private static String uploadToLitterbox(Bitmap bitmap) {
+    private static String uploadToLitterbox(byte[] imageBytes) {
         try {
-            byte[] imageBytes = compress(bitmap);
-            if (imageBytes == null) return null;
-
             String boundary = "----WebKitFormBoundary" + UUID.randomUUID().toString().replace("-", "");
-            HttpURLConnection conn = openPost("https://litterbox.catbox.moe/resources/internals/api.php", boundary);
+            HttpURLConnection conn = openPost(
+                    "https://litterbox.catbox.moe/resources/internals/api.php", boundary);
 
             DataOutputStream dos = new DataOutputStream(conn.getOutputStream());
             writeField(dos, boundary, "reqtype", "fileupload");
@@ -100,18 +168,17 @@ public final class ImageSearchUploader {
             dos.flush();
             dos.close();
 
-            return readBodyIfOk(conn);
+            String body = readBodyIfOk(conn);
+            if (body != null) Log.d(TAG, "Litterbox OK");
+            return body;
         } catch (Exception e) {
             Log.e(TAG, "Litterbox upload error", e);
             return null;
         }
     }
 
-    private static String uploadToCatbox(Bitmap bitmap) {
+    private static String uploadToCatbox(byte[] imageBytes) {
         try {
-            byte[] imageBytes = compress(bitmap);
-            if (imageBytes == null) return null;
-
             String boundary = "----WebKitFormBoundary" + UUID.randomUUID().toString().replace("-", "");
             HttpURLConnection conn = openPost("https://catbox.moe/user/api.php", boundary);
 
@@ -122,7 +189,9 @@ public final class ImageSearchUploader {
             dos.flush();
             dos.close();
 
-            return readBodyIfOk(conn);
+            String body = readBodyIfOk(conn);
+            if (body != null) Log.d(TAG, "Catbox OK");
+            return body;
         } catch (Exception e) {
             Log.e(TAG, "Catbox upload error", e);
             return null;
@@ -135,10 +204,11 @@ public final class ImageSearchUploader {
         conn.setDoOutput(true);
         conn.setDoInput(true);
         conn.setUseCaches(false);
-        conn.setConnectTimeout(TIMEOUT_MS);
-        conn.setReadTimeout(TIMEOUT_MS);
+        conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        conn.setReadTimeout(READ_TIMEOUT_MS);
         conn.setRequestProperty("User-Agent", USER_AGENT);
         conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        // Hint ukuran agar server bisa memproses lebih awal (best-effort)
         return conn;
     }
 
@@ -163,14 +233,14 @@ public final class ImageSearchUploader {
         int code = conn.getResponseCode();
         if (code == 200) {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            byte[] buf = new byte[4096];
+            byte[] buf = new byte[8192];
             int n;
             while ((n = conn.getInputStream().read(buf)) != -1) {
                 bos.write(buf, 0, n);
             }
             return new String(bos.toByteArray(), StandardCharsets.UTF_8).trim();
         }
-        Log.e(TAG, "Upload HTTP " + code);
+        Log.e(TAG, "Upload HTTP " + code + " (" + conn.getURL() + ")");
         return null;
     }
 
@@ -185,8 +255,9 @@ public final class ImageSearchUploader {
             float scale = (float) MAX_SIDE_PX / max;
             bmp = Bitmap.createScaledBitmap(src, Math.round(w * scale), Math.round(h * scale), true);
         }
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream out = new ByteArrayOutputStream(64 * 1024);
         if (!bmp.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)) {
+            if (bmp != src) bmp.recycle();
             return null;
         }
         if (bmp != src) bmp.recycle();

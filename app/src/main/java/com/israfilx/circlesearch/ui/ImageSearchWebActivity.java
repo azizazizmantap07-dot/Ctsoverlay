@@ -113,7 +113,7 @@ public class ImageSearchWebActivity extends Activity {
                 return;
             }
             sourceBitmap = bmp;
-            mainHandler.post(() -> statusText.setText("Mengunggah gambar ke host sementara…"));
+            mainHandler.post(() -> statusText.setText("Mengunggah gambar (host tercepat)…"));
 
             String uploaded = ImageSearchUploader.uploadToImageHost(bmp);
             mainHandler.post(() -> {
