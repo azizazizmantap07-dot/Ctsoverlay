@@ -2,7 +2,6 @@ package com.israfilx.circlesearch.service;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
-import android.animation.ArgbEvaluator;
 import android.animation.ValueAnimator;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -61,7 +60,9 @@ public class FloatingTriggerService extends Service {
     private static final int NOTIF_ID = 1002;
     private static final long AUTO_COLLAPSE_MS = 5000L;
     private static final long ANIM_MS = 220L;
-    private static final long COLOR_CYCLE_MS = 10_000L;
+    private static final long COLOR_CYCLE_MS = 60_000L; // ganti warna tiap 1 menit
+    /** 1 detik sebelum ganti warna: pil memendek lalu hilang. */
+    private static final long COLOR_PRE_HIDE_MS = 1_000L;
     /** Durasi animasi hide/show pil (memendek/memanjang). Sedikit lebih lama agar terasa super smooth. */
     private static final long VISIBILITY_ANIM_MS = 260L;
 
@@ -104,36 +105,69 @@ public class FloatingTriggerService extends Service {
             animateCollapse();
         }
     };
-    private ValueAnimator colorAnim;
+    private ValueAnimator colorAnim; // tidak lagi dipakai untuk crossfade; disisakan agar stopColorCycle aman
 
-    private final Runnable colorCycleRunnable = new Runnable() {
-        @Override
-        public void run() {
-            animateToNextColor();
-            mainHandler.postDelayed(this, COLOR_CYCLE_MS);
-        }
+    /**
+     * 1 detik sebelum ganti warna: pil memendek hingga hilang
+     * (hanya jika masih bentuk pil, bukan tombol bulat expanded).
+     */
+    private final Runnable colorPreHideRunnable = () -> {
+        if (pillView == null || hidingInProgress) return;
+        // Saat expanded (tombol bulat), lewati animasi memendek —
+        // warna akan diganti saat colorCycleRunnable tanpa animasi pil.
+        if (expanded || animating) return;
+        animateColorCycleShrink();
     };
 
-    /** Transisi warna smooth (merah ↔ kuning ↔ hijau). */
-    private void animateToNextColor() {
-        if (pillView == null) return;
-        int from = CYCLE_COLORS[colorIndex];
-        int nextIndex = (colorIndex + 1) % CYCLE_COLORS.length;
-        int to = CYCLE_COLORS[nextIndex];
-        colorIndex = nextIndex;
+    /**
+     * Saat waktunya ganti warna: set warna baru, lalu pil muncul memanjang
+     * ke ukuran normal. Dijadwalkan ulang untuk siklus berikutnya.
+     */
+    private final Runnable colorCycleRunnable = () -> {
+        colorIndex = (colorIndex + 1) % CYCLE_COLORS.length;
+        int nextColor = CYCLE_COLORS[colorIndex];
 
-        if (colorAnim != null) {
-            colorAnim.cancel();
-        }
-        colorAnim = ValueAnimator.ofObject(new ArgbEvaluator(), from, to);
-        colorAnim.setDuration(700);
-        colorAnim.addUpdateListener(a -> {
-            if (pillView != null) {
-                pillView.setFillColor((int) a.getAnimatedValue());
+        if (pillView != null) {
+            pillView.setFillColor(nextColor);
+            if (!expanded && !hidingInProgress && !animating) {
+                // Muncul & memanjang dengan warna baru
+                animateColorCycleExpand();
+            } else {
                 pillView.invalidate();
             }
+        }
+        scheduleColorCycle();
+    };
+
+    /** Pil memendek vertikal hingga hilang (tanpa melepaskan window). */
+    private void animateColorCycleShrink() {
+        if (pillView == null) return;
+        cancelVisibilityAnim();
+        visibilityAnim = ValueAnimator.ofFloat(1f, 0f);
+        visibilityAnim.setDuration(VISIBILITY_ANIM_MS);
+        visibilityAnim.setInterpolator(new android.view.animation.PathInterpolator(0.4f, 0f, 0.2f, 1f));
+        visibilityAnim.addUpdateListener(a -> {
+            if (pillView == null) return;
+            pillView.setVisibilityProgress((float) a.getAnimatedValue());
+            pillView.invalidate();
         });
-        colorAnim.start();
+        visibilityAnim.start();
+    }
+
+    /** Pil muncul memanjang dari tersembunyi ke ukuran normal (warna sudah diganti). */
+    private void animateColorCycleExpand() {
+        if (pillView == null) return;
+        cancelVisibilityAnim();
+        pillView.setVisibilityProgress(0f);
+        visibilityAnim = ValueAnimator.ofFloat(0f, 1f);
+        visibilityAnim.setDuration(VISIBILITY_ANIM_MS);
+        visibilityAnim.setInterpolator(new android.view.animation.PathInterpolator(0.22f, 1f, 0.36f, 1f));
+        visibilityAnim.addUpdateListener(a -> {
+            if (pillView == null) return;
+            pillView.setVisibilityProgress((float) a.getAnimatedValue());
+            pillView.invalidate();
+        });
+        visibilityAnim.start();
     }
 
     private final BroadcastReceiver overlayClosedReceiver = new BroadcastReceiver() {
@@ -357,12 +391,20 @@ public class FloatingTriggerService extends Service {
     }
 
     private void startColorCycle() {
+        scheduleColorCycle();
+    }
+
+    /** Jadwalkan pre-hide (T-1s) dan ganti warna (T) untuk satu siklus penuh. */
+    private void scheduleColorCycle() {
         stopColorCycle();
+        long preHideAt = Math.max(0L, COLOR_CYCLE_MS - COLOR_PRE_HIDE_MS);
+        mainHandler.postDelayed(colorPreHideRunnable, preHideAt);
         mainHandler.postDelayed(colorCycleRunnable, COLOR_CYCLE_MS);
     }
 
     private void stopColorCycle() {
         mainHandler.removeCallbacks(colorCycleRunnable);
+        mainHandler.removeCallbacks(colorPreHideRunnable);
         if (colorAnim != null) {
             colorAnim.cancel();
             colorAnim = null;

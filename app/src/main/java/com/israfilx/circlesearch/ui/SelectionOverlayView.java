@@ -21,7 +21,7 @@ import android.view.animation.LinearInterpolator;
 
 /**
  * Overlay seleksi ala Circle to Search:
- *  1. User menggambar lasso bebas (dengan stroke RGB mengalir).
+ *  1. User menggambar lasso bebas (dengan stroke putih mengalir + denyut).
  *  2. Saat jari diangkat, path diubah otomatis menjadi bingkai
  *     persegi/persegi panjang (bounding box) yang rapi.
  *  3. Bingkai rounded dengan 4 sudut halus (handle sudut saja, ala CTS)
@@ -73,8 +73,10 @@ public class SelectionOverlayView extends View {
     private int activeHandle = HANDLE_NONE;
     private float touchOffsetX, touchOffsetY;
 
-    private float colorPhase = 0f;
-    private ValueAnimator rgbFlowAnimator;
+    private float flowPhase = 0f;
+    private float pulsePhase = 0f; // 0..1 denyut smooth
+    private ValueAnimator flowAnimator;
+    private ValueAnimator pulseAnimator;
 
     private static final int HANDLE_NONE = -1;
     private static final int HANDLE_MOVE = 8;
@@ -82,10 +84,7 @@ public class SelectionOverlayView extends View {
     private static final int HANDLE_TR = 1;
     private static final int HANDLE_BR = 2;
     private static final int HANDLE_BL = 3;
-    // Intensitas penuh; transparansi diterapkan di colorAt / glow (~90% transparan)
-    private static final int COLOR_RED    = 0xFFFF2D2D;
-    private static final int COLOR_YELLOW = 0xFFFFD21E;
-    private static final int COLOR_GREEN  = 0xFF32DC6E;
+    // Stroke putih: intensitas penuh, mengalir + berdenyut
 
     private static final float MIN_DRAG_DISTANCE_PX = 24f;
     private static final float MIN_RECT_SIZE_DP = 40f;
@@ -162,33 +161,43 @@ public class SelectionOverlayView extends View {
     }
 
     private void startRgbFlow() {
-        rgbFlowAnimator = ValueAnimator.ofFloat(0f, 1f);
-        rgbFlowAnimator.setDuration(1200);
-        rgbFlowAnimator.setRepeatCount(ValueAnimator.INFINITE);
-        rgbFlowAnimator.setInterpolator(new LinearInterpolator());
-        rgbFlowAnimator.addUpdateListener(anim -> {
-            colorPhase = (float) anim.getAnimatedValue();
+        // Aliran highlight putih sepanjang path
+        flowAnimator = ValueAnimator.ofFloat(0f, 1f);
+        flowAnimator.setDuration(1400);
+        flowAnimator.setRepeatCount(ValueAnimator.INFINITE);
+        flowAnimator.setInterpolator(new LinearInterpolator());
+        flowAnimator.addUpdateListener(anim -> {
+            flowPhase = (float) anim.getAnimatedValue();
             if (hasMoved || mode == Mode.ADJUST) invalidate();
         });
-        rgbFlowAnimator.start();
+        flowAnimator.start();
+
+        // Denyut smooth: alpha + sedikit tebal stroke
+        pulseAnimator = ValueAnimator.ofFloat(0f, 1f);
+        pulseAnimator.setDuration(1600);
+        pulseAnimator.setRepeatCount(ValueAnimator.INFINITE);
+        pulseAnimator.setRepeatMode(ValueAnimator.REVERSE);
+        pulseAnimator.setInterpolator(new DecelerateInterpolator());
+        pulseAnimator.addUpdateListener(anim -> {
+            pulsePhase = (float) anim.getAnimatedValue();
+            if (hasMoved || mode == Mode.ADJUST) invalidate();
+        });
+        pulseAnimator.start();
     }
 
-    private static int colorAt(float t) {
+    /**
+     * Alpha putih sepanjang path: gelombang terang mengalir (peak ~255),
+     * area lain tetap putih lembut. Dikombinasikan dengan denyut global.
+     */
+    private int whiteAt(float t, float pulse) {
         t = t - (float) Math.floor(t);
-        if (t < 1f / 3f) return lerpColor(COLOR_RED, COLOR_YELLOW, t * 3f);
-        if (t < 2f / 3f) return lerpColor(COLOR_YELLOW, COLOR_GREEN, (t - 1f / 3f) * 3f);
-        return lerpColor(COLOR_GREEN, COLOR_RED, (t - 2f / 3f) * 3f);
-    }
-
-    private static int lerpColor(int a, int b, float f) {
-        f = Math.max(0f, Math.min(1f, f));
-        int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
-        int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
-        // Alpha ~10% (0x1A) → stroke RGB ~90% transparan, intensitas warna penuh
-        return 0x1A000000
-                | ((int) (ar + (br - ar) * f) << 16)
-                | ((int) (ag + (bg - ag) * f) << 8)
-                | (int) (ab + (bb - ab) * f);
+        // Dua puncak terang per siklus agar aliran terasa terus-menerus
+        float wave = (float) Math.sin(t * Math.PI * 2.0);
+        wave = wave * wave; // 0..1, puncak lebih tajam
+        float base = 0.45f + 0.55f * wave; // 0.45..1.0
+        float pulseAmp = 0.72f + 0.28f * pulse; // denyut 72%..100%
+        int alpha = Math.max(1, Math.min(255, (int) (255f * base * pulseAmp)));
+        return (alpha << 24) | 0x00FFFFFF;
     }
 
     private void drawRgbPath(Canvas canvas, Path path) {
@@ -196,22 +205,31 @@ public class SelectionOverlayView extends View {
         float length = pathMeasure.getLength();
         if (length < 1f) return;
         float segmentLen = dp(SEGMENT_DP);
-        float cycleLen = dp(180f);
+        float cycleLen = dp(160f);
+        float pulse = pulsePhase;
+        // Stroke width ikut denyut sedikit
+        float pulseW = 1f + 0.18f * pulse;
+        segmentPaint.setStrokeWidth(dp(3.2f) * pulseW);
+        glowPaint.setStrokeWidth(dp(10f) * pulseW);
+
         for (float d = 0f; d < length; d += segmentLen) {
             float end = Math.min(d + segmentLen + 1f, length);
             segmentPath.reset();
             if (!pathMeasure.getSegment(d, end, segmentPath, true)) continue;
-            float t = ((d / cycleLen) + colorPhase) % 1f;
+            float t = ((d / cycleLen) + flowPhase) % 1f;
             if (t < 0f) t += 1f;
-            int color = colorAt(t);
-            glowPaint.setColor((color & 0x00FFFFFF) | 0x10000000);
+            int color = whiteAt(t, pulse);
+            int a = (color >>> 24) & 0xFF;
+            // Glow lebih transparan dari core stroke
+            int glowA = Math.max(1, (int) (a * 0.28f));
+            glowPaint.setColor((glowA << 24) | 0x00FFFFFF);
             canvas.drawPath(segmentPath, glowPaint);
             segmentPaint.setColor(color);
             canvas.drawPath(segmentPath, segmentPaint);
         }
     }
 
-    /** Stroke RGB di sekeliling rect (untuk mode ADJUST). */
+    /** Stroke putih mengalir di sekeliling rect (mode ADJUST). */
     private void drawRgbRect(Canvas canvas, RectF r) {
         Path rectPath = new Path();
         float radius = dp(14);
@@ -500,11 +518,13 @@ public class SelectionOverlayView extends View {
     }
 
     public void destroy() {
-        if (rgbFlowAnimator != null) rgbFlowAnimator.cancel();
+        if (flowAnimator != null) flowAnimator.cancel();
+        if (pulseAnimator != null) pulseAnimator.cancel();
     }
 
     public void dismissAnimated(Runnable onEnd) {
-        if (rgbFlowAnimator != null) rgbFlowAnimator.cancel();
+        if (flowAnimator != null) flowAnimator.cancel();
+        if (pulseAnimator != null) pulseAnimator.cancel();
         animate()
                 .alpha(0f)
                 .setDuration(FADE_OUT_DURATION_MS)
