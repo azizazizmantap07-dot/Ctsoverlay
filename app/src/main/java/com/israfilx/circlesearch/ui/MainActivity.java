@@ -65,27 +65,51 @@ public class MainActivity extends Activity {
 
     private Set<String> downloadedCodes = new HashSet<>();
 
+    // ---- Palet tema dark soft ----
+    private static final String BG_DARK = "#14161C";
+    private static final String CARD_DARK = "#1D2029";
+    private static final String TEXT_PRIMARY = "#ECEDF2";
+    private static final String TEXT_SECONDARY = "#9A9DAE";
+    private static final String TEXT_BODY = "#8890A6";
+    private static final String STATUS_OK = "#4FD37A";
+    private static final String STATUS_BAD = "#FF6B6B";
+    private static final String STATUS_NEUTRAL = "#6B7080";
+    private static final String BTN_BG = "#262A38";
+    private static final String BTN_TEXT = "#E4E6F0";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(Color.parseColor("#FAFAFA"));
+        scroll.setBackgroundColor(Color.parseColor(BG_DARK));
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(20);
         root.setPadding(pad, pad, pad, pad);
         scroll.addView(root);
 
-        // ---- Judul RGB animasi ----
+        // ---- Judul cyberpunk: RGB + glow animasi ----
         TextView title = new TextView(this);
-        title.setText("Circle To Search by: Aziz_dev");
-        title.setTextSize(22);
-        title.setTypeface(null, Typeface.BOLD);
+        title.setText("CIRCLE TO SEARCH");
+        title.setTextSize(30);
+        title.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        title.setLetterSpacing(0.12f);
         title.setGravity(Gravity.CENTER_HORIZONTAL);
-        title.setPadding(0, dp(8), 0, dp(16));
+        title.setPadding(0, dp(12), 0, dp(4));
+        title.setShadowLayer(18f, 0f, 0f, Color.parseColor("#DC2828"));
         root.addView(title);
         startTitleRgbAnimation(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("by: Aziz_dev");
+        subtitle.setTextSize(12);
+        subtitle.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL);
+        subtitle.setLetterSpacing(0.15f);
+        subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        subtitle.setTextColor(Color.parseColor(TEXT_SECONDARY));
+        subtitle.setPadding(0, 0, 0, dp(18));
+        root.addView(subtitle);
 
         // ============================================================
         // PERIZINAN INTI
@@ -193,18 +217,41 @@ public class MainActivity extends Activity {
         setContentView(scroll);
     }
 
-    /** Judul RGB dinamis: merah → kuning → hijau → merah (loop). */
+    /**
+     * Judul cyberpunk RGB + glow dinamis: merah → kuning → hijau → merah (loop).
+     * Warna teks dan warna shadow-glow dianimasikan bersamaan, plus radius glow
+     * "bernapas" (membesar-mengecil) agar terasa seperti neon sign yang hidup.
+     */
     private void startTitleRgbAnimation(TextView title) {
-        int red = Color.rgb(220, 40, 40);
-        int yellow = Color.rgb(230, 180, 20);
-        int green = Color.rgb(40, 170, 70);
-        ValueAnimator anim = ValueAnimator.ofObject(
+        int red = Color.rgb(255, 45, 45);
+        int yellow = Color.rgb(255, 210, 30);
+        int green = Color.rgb(50, 220, 110);
+
+        ValueAnimator colorAnim = ValueAnimator.ofObject(
                 new ArgbEvaluator(), red, yellow, green, red);
-        anim.setDuration(4000);
-        anim.setRepeatCount(ValueAnimator.INFINITE);
-        anim.setRepeatMode(ValueAnimator.RESTART);
-        anim.addUpdateListener(a -> title.setTextColor((int) a.getAnimatedValue()));
-        anim.start();
+        colorAnim.setDuration(5000);
+        colorAnim.setRepeatCount(ValueAnimator.INFINITE);
+        colorAnim.setRepeatMode(ValueAnimator.RESTART);
+        colorAnim.addUpdateListener(a -> {
+            int color = (int) a.getAnimatedValue();
+            title.setTextColor(color);
+            float radius = title.getTag() != null ? (float) title.getTag() : 18f;
+            title.setShadowLayer(radius, 0f, 0f, color);
+        });
+        colorAnim.start();
+
+        // Radius glow "bernapas" — dianimasikan terpisah agar independen dari warna
+        ValueAnimator glowPulse = ValueAnimator.ofFloat(14f, 26f);
+        glowPulse.setDuration(1400);
+        glowPulse.setRepeatCount(ValueAnimator.INFINITE);
+        glowPulse.setRepeatMode(ValueAnimator.REVERSE);
+        glowPulse.addUpdateListener(a -> {
+            float radius = (float) a.getAnimatedValue();
+            title.setTag(radius);
+            int currentColor = title.getCurrentTextColor();
+            title.setShadowLayer(radius, 0f, 0f, currentColor);
+        });
+        glowPulse.start();
     }
 
     protected void onResume() {
@@ -239,7 +286,7 @@ public class MainActivity extends Activity {
         statusOverlay.setText(overlayGranted
                 ? "✓ Diizinkan"
                 : "✗ Belum diizinkan — wajib diaktifkan");
-        statusOverlay.setTextColor(overlayGranted ? Color.parseColor("#2E7D32") : Color.parseColor("#C62828"));
+        statusOverlay.setTextColor(overlayGranted ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_BAD));
 
         // Assistant
         String assistant = null;
@@ -251,11 +298,11 @@ public class MainActivity extends Activity {
         statusAssistant.setText(isAssistant
                 ? "✓ Sudah diatur sebagai asisten digital\n  (" + assistant + ")"
                 : "✗ Belum diatur — ketuk tombol di bawah untuk mengatur");
-        statusAssistant.setTextColor(isAssistant ? Color.parseColor("#2E7D32") : Color.parseColor("#C62828"));
+        statusAssistant.setTextColor(isAssistant ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_BAD));
 
         // Root (cek cepat tanpa blocking lama)
         statusRoot.setText("Menekan tombol \"Cek akses root\" untuk memeriksa…");
-        statusRoot.setTextColor(Color.GRAY);
+        statusRoot.setTextColor(Color.parseColor(STATUS_NEUTRAL));
 
         // Floating
         boolean floatingOn = getSharedPreferences(FloatingTriggerService.PREFS, MODE_PRIVATE)
@@ -265,7 +312,7 @@ public class MainActivity extends Activity {
                     ? "✓ Floating Trigger AKTIF (pil di tepi kiri)"
                     : "○ Floating Trigger nonaktif");
             statusFloating.setTextColor(floatingOn
-                    ? Color.parseColor("#2E7D32") : Color.GRAY);
+                    ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_NEUTRAL));
         }
 
         // Accessibility
@@ -275,7 +322,7 @@ public class MainActivity extends Activity {
                     ? "✓ Accessibility aktif (screenshot siap)"
                     : "✗ Accessibility belum aktif — wajib untuk floating tanpa root");
             statusA11y.setTextColor(a11y
-                    ? Color.parseColor("#2E7D32") : Color.parseColor("#C62828"));
+                    ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_BAD));
         }
 
         // Battery
@@ -285,7 +332,7 @@ public class MainActivity extends Activity {
                     ? "✓ Tanpa batasan baterai (tidak dioptimasi sistem)"
                     : "✗ Masih dioptimasi — service bisa di-kill sistem");
             statusBattery.setTextColor(unrestricted
-                    ? Color.parseColor("#2E7D32") : Color.parseColor("#C62828"));
+                    ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_BAD));
         }
     }
 
@@ -364,7 +411,7 @@ public class MainActivity extends Activity {
             boolean ok = RootShell.open();
             mainHandler.post(() -> {
                 statusRoot.setText(ok ? "✓ Akses root TERSEDIA" : "✗ Akses root TIDAK TERSEDIA");
-                statusRoot.setTextColor(ok ? Color.parseColor("#2E7D32") : Color.parseColor("#C62828"));
+                statusRoot.setTextColor(ok ? Color.parseColor(STATUS_OK) : Color.parseColor(STATUS_BAD));
             });
         }).start();
     }
@@ -446,7 +493,7 @@ public class MainActivity extends Activity {
                     languageStatusText.setText("Model terunduh: " + count + " bahasa"
                             + (codes.contains(OcrTranslateHelper.TARGET_LANGUAGE)
                             ? " (termasuk Indonesia)" : " — model target Indonesia BELUM ada"));
-                    languageStatusText.setTextColor(Color.parseColor("#1565C0"));
+                    languageStatusText.setTextColor(Color.parseColor("#5AA9FF"));
                     rebuildLanguageList();
                 });
             }
@@ -455,7 +502,7 @@ public class MainActivity extends Activity {
             public void onFailure(Exception e) {
                 mainHandler.post(() -> {
                     languageStatusText.setText("Gagal memeriksa model: " + e.getMessage());
-                    languageStatusText.setTextColor(Color.parseColor("#C62828"));
+                    languageStatusText.setTextColor(Color.parseColor(STATUS_BAD));
                     rebuildLanguageList();
                 });
             }
@@ -478,7 +525,7 @@ public class MainActivity extends Activity {
             TextView name = new TextView(this);
             name.setText((ready ? "✓ " : "○ ") + info.displayName);
             name.setTextSize(14);
-            name.setTextColor(ready ? Color.parseColor("#2E7D32") : Color.parseColor("#424242"));
+            name.setTextColor(ready ? Color.parseColor(STATUS_OK) : Color.parseColor(TEXT_SECONDARY));
             LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             name.setLayoutParams(np);
             row.addView(name);
@@ -635,6 +682,7 @@ public class MainActivity extends Activity {
         tv.setText(text);
         tv.setTextSize(18);
         tv.setPadding(0, 0, 0, dp(4));
+        tv.setTextColor(Color.parseColor(TEXT_PRIMARY));
         return tv;
     }
 
@@ -644,7 +692,7 @@ public class MainActivity extends Activity {
         tv.setTextSize(15);
         tv.setTypeface(null, Typeface.BOLD);
         tv.setPadding(0, dp(22), 0, dp(6));
-        tv.setTextColor(Color.parseColor("#212121"));
+        tv.setTextColor(Color.parseColor(TEXT_PRIMARY));
         return tv;
     }
 
@@ -654,7 +702,7 @@ public class MainActivity extends Activity {
         tv.setTextSize(14);
         tv.setTypeface(null, Typeface.BOLD);
         tv.setPadding(0, dp(10), 0, dp(2));
-        tv.setTextColor(Color.parseColor("#333333"));
+        tv.setTextColor(Color.parseColor(TEXT_PRIMARY));
         return tv;
     }
 
@@ -663,7 +711,7 @@ public class MainActivity extends Activity {
         tv.setText(text);
         tv.setTextSize(12);
         tv.setPadding(0, dp(2), 0, dp(6));
-        tv.setTextColor(Color.parseColor("#757575"));
+        tv.setTextColor(Color.parseColor(TEXT_BODY));
         return tv;
     }
 
@@ -671,6 +719,7 @@ public class MainActivity extends Activity {
         TextView tv = new TextView(this);
         tv.setTextSize(12);
         tv.setPadding(dp(8), 0, 0, dp(2));
+        tv.setTextColor(Color.parseColor(STATUS_NEUTRAL));
         return tv;
     }
 
@@ -679,6 +728,8 @@ public class MainActivity extends Activity {
         btn.setText(label);
         btn.setAllCaps(false);
         btn.setTextSize(13);
+        btn.setTextColor(Color.parseColor(BTN_TEXT));
+        btn.setBackgroundColor(Color.parseColor(BTN_BG));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(2);
