@@ -18,12 +18,11 @@ translate berlangsung).
 **Visual search ("Cari")** punya dua mode (bisa diganti di halaman
 pengaturan):
 
-1. **Di dalam aplikasi (WebView)** — default. Membuka
-   `ImageSearchWebActivity` yang menampilkan Yandex / Bing / Google Images
-   di WebView milik app sendiri. Saat halaman meminta upload gambar, Uri
-   hasil crop di-inject otomatis lewat `onShowFileChooser` sehingga user
-   tidak perlu memilih file manual. Terasa menyatu, tidak melempar ke
-   aplikasi lain.
+1. **Di dalam aplikasi (WebView)** — default. Gambar di-upload ke host
+   sementara (Litterbox 1 jam / Catbox), lalu WebView membuka URL hasil
+   reverse search langsung (Yandex / Bing / Google Lens / TinEye) —
+   pola sama seperti AKS-Labs/CircleToSearch. Hasil muncul otomatis,
+   tanpa file chooser.
 2. **Aplikasi eksternal** — perilaku lama: share Intent ke Yandex → Bing →
    Google Lens → chooser sistem. Lihat `util/ImageSearchShareUtil.java`
    untuk urutan preferensi package.

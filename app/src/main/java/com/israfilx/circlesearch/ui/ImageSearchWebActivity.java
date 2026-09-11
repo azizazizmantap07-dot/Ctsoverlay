@@ -2,15 +2,17 @@ package com.israfilx.circlesearch.ui;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
-import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -21,18 +23,21 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.israfilx.circlesearch.util.ImageSearchUploader;
+
+import java.io.InputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 /**
- * Menampilkan hasil reverse image search di dalam WebView milik app sendiri
- * supaya user tidak merasa berpindah ke aplikasi lain.
+ * Reverse image search in-app lewat WebView.
  *
- * Alur:
- *  1. OverlayCaptureService menyimpan bitmap crop ke cache + kirim content://
- *     Uri lewat Intent.
- *  2. Activity ini memuat halaman reverse-image-search (default Yandex).
- *  3. Saat halaman meminta upload file (onShowFileChooser), Uri gambar
- *     langsung di-inject — user tidak perlu memilih file manual.
- *  4. Toolbar atas memungkinkan ganti mesin pencari (Yandex / Bing / Google)
- *     tanpa keluar dari activity.
+ * Alur (mengikuti AKS-Labs/CircleToSearch):
+ *  1. Terima content:// Uri gambar crop.
+ *  2. Upload ke Litterbox (1 jam) / Catbox → dapat URL publik.
+ *  3. Bangun URL mesin pencari yang sudah berisi parameter image URL
+ *     (Yandex / Bing / Google Lens / TinEye).
+ *  4. Load URL itu di WebView → hasil langsung tampil, tanpa file chooser.
  */
 public class ImageSearchWebActivity extends Activity {
 
@@ -40,19 +45,20 @@ public class ImageSearchWebActivity extends Activity {
 
     public static final String EXTRA_IMAGE_URI = "image_uri";
 
-    // URL entry point yang relatif ramah untuk reverse image search via WebView.
-    private static final String URL_YANDEX = "https://yandex.com/images/";
-    private static final String URL_BING   = "https://www.bing.com/visualsearch";
-    private static final String URL_GOOGLE = "https://images.google.com/";
-
     private WebView webView;
     private ProgressBar progressBar;
-    private Uri pendingImageUri;
-    private ValueCallback<Uri[]> filePathCallback;
+    private TextView statusText;
     private TextView btnYandex;
     private TextView btnBing;
     private TextView btnGoogle;
+    private TextView btnTinEye;
+
+    private String publicImageUrl;
     private String currentEngine = "yandex";
+    private Bitmap sourceBitmap;
+
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -64,9 +70,7 @@ public class ImageSearchWebActivity extends Activity {
             finish();
             return;
         }
-        pendingImageUri = Uri.parse(uriStr);
 
-        // Layout root: toolbar + progress + WebView
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.parseColor("#14161C"));
@@ -80,34 +84,75 @@ public class ImageSearchWebActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
         root.addView(progressBar);
 
+        statusText = new TextView(this);
+        statusText.setText("Mengunggah gambar…");
+        statusText.setTextColor(Color.parseColor("#C8CBD8"));
+        statusText.setTextSize(13);
+        statusText.setGravity(Gravity.CENTER);
+        statusText.setPadding(dp(12), dp(16), dp(12), dp(8));
+        root.addView(statusText);
+
         webView = new WebView(this);
         LinearLayout.LayoutParams webLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         webView.setLayoutParams(webLp);
+        webView.setVisibility(View.GONE);
         root.addView(webView);
 
         setContentView(root);
-
         setupWebView();
-        loadEngine("yandex");
+
+        final Uri contentUri = Uri.parse(uriStr);
+        executor.execute(() -> {
+            Bitmap bmp = decodeBitmap(contentUri);
+            if (bmp == null) {
+                mainHandler.post(() -> {
+                    statusText.setText("Gagal membaca gambar");
+                    Toast.makeText(this, "Gagal membaca gambar", Toast.LENGTH_SHORT).show();
+                });
+                return;
+            }
+            sourceBitmap = bmp;
+            mainHandler.post(() -> statusText.setText("Mengunggah gambar ke host sementara…"));
+
+            String uploaded = ImageSearchUploader.uploadToImageHost(bmp);
+            mainHandler.post(() -> {
+                if (uploaded == null) {
+                    statusText.setText("Gagal mengunggah gambar.\nPeriksa koneksi internet lalu coba lagi.");
+                    Toast.makeText(this, "Upload gagal", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                publicImageUrl = uploaded;
+                statusText.setVisibility(View.GONE);
+                webView.setVisibility(View.VISIBLE);
+                loadEngine("yandex");
+            });
+        });
+    }
+
+    private Bitmap decodeBitmap(Uri uri) {
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) return null;
+            return BitmapFactory.decodeStream(in);
+        } catch (Exception e) {
+            Log.e(TAG, "decodeBitmap failed", e);
+            return null;
+        }
     }
 
     private View buildToolbar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(8), dp(10), dp(8), dp(10));
+        bar.setPadding(dp(6), dp(8), dp(6), dp(8));
         bar.setBackgroundColor(Color.parseColor("#1D2029"));
 
-        // Tombol tutup
-        TextView btnClose = makeChip("✕  Tutup", true);
+        TextView btnClose = makeChip("✕", true);
         btnClose.setOnClickListener(v -> finish());
         bar.addView(btnClose);
 
-        // Spacer
         View spacer = new View(this);
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(0, 1, 1f);
-        spacer.setLayoutParams(sp);
+        spacer.setLayoutParams(new LinearLayout.LayoutParams(0, 1, 1f));
         bar.addView(spacer);
 
         btnYandex = makeChip("Yandex", false);
@@ -118,9 +163,13 @@ public class ImageSearchWebActivity extends Activity {
         btnBing.setOnClickListener(v -> loadEngine("bing"));
         bar.addView(btnBing);
 
-        btnGoogle = makeChip("Google", false);
+        btnGoogle = makeChip("Lens", false);
         btnGoogle.setOnClickListener(v -> loadEngine("google"));
         bar.addView(btnGoogle);
+
+        btnTinEye = makeChip("TinEye", false);
+        btnTinEye.setOnClickListener(v -> loadEngine("tineye"));
+        bar.addView(btnTinEye);
 
         return bar;
     }
@@ -128,13 +177,13 @@ public class ImageSearchWebActivity extends Activity {
     private TextView makeChip(String label, boolean isClose) {
         TextView tv = new TextView(this);
         tv.setText(label);
-        tv.setTextSize(13);
-        tv.setPadding(dp(12), dp(8), dp(12), dp(8));
+        tv.setTextSize(12);
+        tv.setPadding(dp(10), dp(7), dp(10), dp(7));
         tv.setTextColor(Color.parseColor(isClose ? "#FF8A8A" : "#C8CBD8"));
         tv.setBackgroundColor(Color.parseColor(isClose ? "#3A2228" : "#2A2E3C"));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(dp(4), 0, dp(4), 0);
+        lp.setMargins(dp(3), 0, dp(3), 0);
         tv.setLayoutParams(lp);
         tv.setClickable(true);
         tv.setFocusable(true);
@@ -150,12 +199,12 @@ public class ImageSearchWebActivity extends Activity {
 
         btnYandex.setBackgroundColor("yandex".equals(engine) ? activeBg : inactiveBg);
         btnYandex.setTextColor("yandex".equals(engine) ? activeText : inactiveText);
-
         btnBing.setBackgroundColor("bing".equals(engine) ? activeBg : inactiveBg);
         btnBing.setTextColor("bing".equals(engine) ? activeText : inactiveText);
-
         btnGoogle.setBackgroundColor("google".equals(engine) ? activeBg : inactiveBg);
         btnGoogle.setTextColor("google".equals(engine) ? activeText : inactiveText);
+        btnTinEye.setBackgroundColor("tineye".equals(engine) ? activeBg : inactiveBg);
+        btnTinEye.setTextColor("tineye".equals(engine) ? activeText : inactiveText);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -171,8 +220,6 @@ public class ImageSearchWebActivity extends Activity {
         s.setBuiltInZoomControls(true);
         s.setDisplayZoomControls(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        // User-Agent mirip Chrome mobile — beberapa situs reverse-search
-        // lebih kooperatif dibanding UA WebView bawaan.
         s.setUserAgentString(
                 "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
                         + "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36");
@@ -180,7 +227,6 @@ public class ImageSearchWebActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                // Biarkan semua navigasi di dalam WebView (jangan lempar ke browser eksternal)
                 return false;
             }
 
@@ -196,71 +242,37 @@ public class ImageSearchWebActivity extends Activity {
                 progressBar.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
                 progressBar.setProgress(newProgress);
             }
-
-            /**
-             * Saat halaman reverse-search meminta file upload, langsung
-             * berikan Uri gambar yang sudah di-crop. Ini kunci supaya
-             * terasa "satu ketuk" tanpa dialog file picker sistem.
-             */
-            @Override
-            public boolean onShowFileChooser(WebView webView,
-                    ValueCallback<Uri[]> filePathCallback,
-                    FileChooserParams fileChooserParams) {
-
-                // Batalkan callback sebelumnya jika ada
-                if (ImageSearchWebActivity.this.filePathCallback != null) {
-                    ImageSearchWebActivity.this.filePathCallback.onReceiveValue(null);
-                }
-                ImageSearchWebActivity.this.filePathCallback = filePathCallback;
-
-                if (pendingImageUri != null) {
-                    Log.d(TAG, "Inject image Uri ke file chooser: " + pendingImageUri);
-                    filePathCallback.onReceiveValue(new Uri[]{ pendingImageUri });
-                    ImageSearchWebActivity.this.filePathCallback = null;
-                    return true;
-                }
-
-                filePathCallback.onReceiveValue(null);
-                ImageSearchWebActivity.this.filePathCallback = null;
-                return true;
-            }
         });
     }
 
     private void loadEngine(String engine) {
+        if (publicImageUrl == null) {
+            Toast.makeText(this, "Gambar belum siap", Toast.LENGTH_SHORT).show();
+            return;
+        }
         highlightEngine(engine);
+
         String url;
         switch (engine) {
             case "bing":
-                url = URL_BING;
+                url = ImageSearchUploader.getBingUrl(publicImageUrl);
                 break;
             case "google":
-                url = URL_GOOGLE;
+                url = ImageSearchUploader.getGoogleLensUrl(publicImageUrl);
+                break;
+            case "tineye":
+                url = ImageSearchUploader.getTinEyeUrl(publicImageUrl);
                 break;
             case "yandex":
             default:
-                url = URL_YANDEX;
+                url = ImageSearchUploader.getYandexUrl(publicImageUrl);
                 break;
         }
-        Log.d(TAG, "Load reverse image search: " + url);
+
+        Log.d(TAG, "Load search URL: " + url);
         progressBar.setVisibility(View.VISIBLE);
         progressBar.setProgress(0);
         webView.loadUrl(url);
-
-        // Petunjuk singkat sekali per engine (toast)
-        String hint;
-        switch (engine) {
-            case "bing":
-                hint = "Ketuk ikon kamera / \"Search using an image\" lalu gambar akan otomatis diunggah";
-                break;
-            case "google":
-                hint = "Ketuk ikon kamera di bilah pencarian, lalu gambar akan otomatis diunggah";
-                break;
-            default:
-                hint = "Ketuk ikon kamera di bilah pencarian Yandex, lalu gambar akan otomatis diunggah";
-                break;
-        }
-        Toast.makeText(this, hint, Toast.LENGTH_LONG).show();
     }
 
     @Override
@@ -274,14 +286,15 @@ public class ImageSearchWebActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        if (filePathCallback != null) {
-            filePathCallback.onReceiveValue(null);
-            filePathCallback = null;
-        }
+        executor.shutdownNow();
         if (webView != null) {
             webView.stopLoading();
             webView.destroy();
             webView = null;
+        }
+        if (sourceBitmap != null && !sourceBitmap.isRecycled()) {
+            sourceBitmap.recycle();
+            sourceBitmap = null;
         }
         super.onDestroy();
     }
