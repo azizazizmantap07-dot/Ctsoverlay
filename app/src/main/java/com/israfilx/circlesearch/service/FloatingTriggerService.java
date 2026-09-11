@@ -16,6 +16,7 @@ import android.content.SharedPreferences;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.RectF;
 import android.os.Build;
@@ -80,6 +81,9 @@ public class FloatingTriggerService extends Service {
     private boolean animating = false;
     private int savedY = 200;
     private int colorIndex = 0;
+    /** Sudut putar tombol bulat gaya Chrome (derajat). */
+    private float spinAngle = 0f;
+    private ValueAnimator spinAnim;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable autoCollapseRunnable = () -> {
@@ -227,6 +231,7 @@ public class FloatingTriggerService extends Service {
     private void hidePill() {
         cancelAutoCollapse();
         stopColorCycle();
+        stopChromeSpin();
         if (pillView != null) {
             try {
                 windowManager.removeView(pillView);
@@ -295,6 +300,7 @@ public class FloatingTriggerService extends Service {
                 pillView.setExpanded(true);
                 pillView.setProgress(1f);
                 pillView.invalidate();
+                startChromeSpin();
                 scheduleAutoCollapse();
             }
         });
@@ -333,6 +339,7 @@ public class FloatingTriggerService extends Service {
             public void onAnimationEnd(Animator animation) {
                 expanded = false;
                 animating = false;
+                stopChromeSpin();
                 params.x = 0;
                 params.width = endW;
                 params.height = endH;
@@ -430,6 +437,10 @@ public class FloatingTriggerService extends Service {
             progress = Math.max(0f, Math.min(1f, p));
         }
 
+        private final Paint chromePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint centerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
         @Override
         protected void onDraw(Canvas canvas) {
             float w = getWidth();
@@ -440,22 +451,55 @@ public class FloatingTriggerService extends Service {
             float visPillH = dp(VISUAL_PILL_H_DP);
             float visBtn = dp(VISUAL_BTN_DP);
 
-            // Interpolasi: visual dari pil di kiri → lingkaran di tengah
+            // Interpolasi ukuran: pil → lingkaran
             float curW = visPillW + (visBtn - visPillW) * progress;
             float curH = visPillH + (visBtn - visPillH) * progress;
-            // Saat progress 0, tempel kiri; saat 1, center di window
             float left = (w - curW) * progress * 0.5f;
             float top = (h - curH) * 0.5f;
+            float cx = left + curW / 2f;
+            float cy = top + curH / 2f;
+            float radius = Math.min(curW, curH) / 2f;
 
-            float corner = (Math.min(curW, curH) / 2f);
-            RectF rect = new RectF(left, top, left + curW, top + curH);
-            canvas.drawRoundRect(rect, corner, corner, fillPaint);
+            if (progress < 0.35f) {
+                // Bentuk pil: warna siklus solid
+                float corner = Math.min(curW, curH) / 2f;
+                RectF rect = new RectF(left, top, left + curW, top + curH);
+                canvas.drawRoundRect(rect, corner, corner, fillPaint);
+            } else {
+                // Tombol bulat gaya Chrome: 3 segmen RGB berputar
+                float chromeAlpha = Math.min(1f, (progress - 0.35f) / 0.65f);
+                int save = canvas.save();
+                canvas.rotate(spinAngle, cx, cy);
 
-            if (progress > 0.3f) {
-                float alpha = (progress - 0.3f) / 0.7f;
-                dotPaint.setAlpha((int) (255 * alpha));
-                float r = Math.min(curW, curH) * 0.12f * progress;
-                canvas.drawCircle(left + curW / 2f, top + curH / 2f, r, dotPaint);
+                RectF oval = new RectF(cx - radius, cy - radius, cx + radius, cy + radius);
+                // Merah (atas) ~120°, kuning (kanan-bawah), hijau (kiri-bawah)
+                chromePaint.setStyle(Paint.Style.FILL);
+                chromePaint.setColor(Color.rgb(219, 68, 55)); // red
+                chromePaint.setAlpha((int) (255 * chromeAlpha));
+                canvas.drawArc(oval, -90 - 10, 120, true, chromePaint);
+
+                chromePaint.setColor(Color.rgb(244, 180, 0)); // yellow
+                canvas.drawArc(oval, 30 - 10, 120, true, chromePaint);
+
+                chromePaint.setColor(Color.rgb(15, 157, 88)); // green
+                canvas.drawArc(oval, 150 - 10, 120, true, chromePaint);
+
+                canvas.restoreToCount(save);
+
+                // Cincin putih
+                float ringOuter = radius * 0.52f;
+                float ringInner = radius * 0.36f;
+                ringPaint.setStyle(Paint.Style.STROKE);
+                ringPaint.setStrokeWidth(ringOuter - ringInner);
+                ringPaint.setColor(Color.WHITE);
+                ringPaint.setAlpha((int) (255 * chromeAlpha));
+                canvas.drawCircle(cx, cy, (ringOuter + ringInner) / 2f, ringPaint);
+
+                // Pusat gelap
+                centerPaint.setStyle(Paint.Style.FILL);
+                centerPaint.setColor(Color.rgb(50, 50, 50));
+                centerPaint.setAlpha((int) (255 * chromeAlpha));
+                canvas.drawCircle(cx, cy, ringInner * 0.85f, centerPaint);
             }
         }
 
