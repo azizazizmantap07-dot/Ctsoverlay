@@ -109,21 +109,25 @@ public final class OcrTranslateHelper {
      * Blok OCR dengan tinggi kotak di bawah ini (dalam px bitmap sumber)
      * diabaikan saat membangun teks gabungan untuk DETEKSI BAHASA.
      *
-     * DINAIKKAN dari 18 -> 26: pada mode "1 layar", nilai 18px terlalu
-     * longgar dan meloloskan elemen UI kecil (label ikon, badge notifikasi)
-     * yang bukan konten aplikasi sungguhan sebagai sinyal deteksi bahasa.
+     * DINAIKKAN 18 -> 26 -> 34: mode "1 layar" perlu menyaring elemen UI
+     * kecil (label ikon, badge notifikasi, watermark kecil) seagresif
+     * mungkin dari sinyal deteksi bahasa. Aman dinaikkan karena ada
+     * fallback di {@link #detectLanguageAndTranslateBlocks} — bila SEMUA
+     * blok kebuang filter ini, kode otomatis balik memakai seluruh blok
+     * OCR apa adanya (lihat blocksForLangDetect), jadi tidak akan pernah
+     * membuat translate "kehabisan teks untuk dideteksi".
      */
-    private static final int MIN_BLOCK_HEIGHT_PX_FOR_LANG_DETECT = 26;
+    private static final int MIN_BLOCK_HEIGHT_PX_FOR_LANG_DETECT = 34;
     /**
      * Blok dengan teks lebih pendek dari ini (setelah trim) juga dianggap
      * noise untuk deteksi bahasa.
      *
-     * DINAIKKAN dari 2 -> 4: string sangat pendek (1-3 karakter) seperti
-     * jam ("12.34"), persentase baterai ("76"), atau ikon berlabel satu
-     * huruf nyaris tidak membawa sinyal bahasa yang berguna, tapi bisa
-     * mengotori hasil deteksi bila jumlahnya banyak.
+     * DINAIKKAN 2 -> 4 -> 6: string pendek (jam, baterai, badge, nomor
+     * urut, singkatan) nyaris tidak membawa sinyal bahasa yang berguna.
+     * 6 karakter cukup ketat untuk membuang noise semacam itu, tapi masih
+     * meloloskan frasa pendek valid ("Selamat", "Battery", dst).
      */
-    private static final int MIN_BLOCK_CHARS_FOR_LANG_DETECT = 4;
+    private static final int MIN_BLOCK_CHARS_FOR_LANG_DETECT = 6;
     /**
      * Ambang confidence untuk {@link LanguageIdentifier}, DITURUNKAN dari
      * default 0.5 menjadi 0.35. Screenshot "1 layar" hampir selalu berisi
@@ -133,6 +137,15 @@ public final class OcrTranslateHelper {
      * Ambang default 0.5 terlalu mudah menghasilkan "und" (tidak
      * terdeteksi) pada kasus ini, yang membuat translate dilewati sama
      * sekali meski sebenarnya teksnya jelas satu bahasa.
+     *
+     * SENGAJA TIDAK diperketat lebih lanjut (mis. dinaikkan ke 0.45-0.5)
+     * meski filter-filter di atas sudah diperketat — parameter ini paling
+     * sensitif terhadap bug baru: menaikkannya kembali membuat translate
+     * mode "1 layar" mudah jatuh ke "und" lagi (bug awal yang sudah
+     * diperbaiki), sementara menurunkannya lebih jauh dari 0.35 membuat
+     * hasil deteksi makin sering "percaya diri" pada tebakan yang salah.
+     * 0.35 adalah titik tengah yang sudah diuji; jangan digeser tanpa
+     * pengujian nyata di berbagai jenis screenshot.
      */
     private static final float LANGUAGE_CONFIDENCE_THRESHOLD = 0.35f;
 
@@ -307,10 +320,14 @@ public final class OcrTranslateHelper {
 
     /**
      * Fallback saat deteksi bahasa dari string gabungan menghasilkan "und".
-     * Coba identifyPossibleLanguages pada blok teks TERPANJANG saja (paling
-     * mungkin konten aplikasi sungguhan, bukan noise UI), ambil kandidat
-     * dengan confidence tertinggi. Jika tetap tidak ada kandidat yang lolos
-     * ambang, baru benar-benar menyerah dan tampilkan teks asli.
+     * Dua lapis, dari yang paling "murni" ke paling "luas":
+     *  1. Coba identifyPossibleLanguages pada SATU blok teks terpanjang
+     *     saja — paling mungkin konten aplikasi sungguhan, bebas campuran.
+     *  2. Bila itu juga gagal (mis. blok terpanjang ternyata masih pendek
+     *     karena filter noise sudah agresif), coba lagi dengan gabungan
+     *     2-3 blok terpanjang — jaring pengaman supaya filter yang ketat
+     *     di atas tidak membuat translate jadi lebih sering menyerah.
+     * Jika kedua lapis tetap gagal, baru benar-benar menampilkan teks asli.
      */
     private static void detectLanguageFromLongestBlockFallback(
             List<Text.TextBlock> sortedForDetect, List<Text.TextBlock> allBlocks,
@@ -333,36 +350,86 @@ public final class OcrTranslateHelper {
                 .addOnSuccessListener(candidates -> {
                     if (!isCurrent(generation)) return;
 
-                    String best = null;
-                    float bestConfidence = 0f;
-                    for (IdentifiedLanguage candidate : candidates) {
-                        String code = candidate.getLanguageTag();
-                        if ("und".equals(code)) continue;
-                        if (candidate.getConfidence() > bestConfidence) {
-                            bestConfidence = candidate.getConfidence();
-                            best = code;
-                        }
-                    }
-
-                    if (best == null) {
-                        Log.d(TAG, "Fallback deteksi bahasa juga gagal, tampilkan teks asli");
-                        callback.onSuccess(toUntranslatedBlocks(allBlocks));
+                    String best = pickBestCandidate(candidates);
+                    if (best != null) {
+                        Log.d(TAG, "Bahasa terdeteksi (fallback lapis-1, blok terpanjang): " + best);
+                        finishLanguageDetected(best, allBlocks, callback, generation);
                         return;
                     }
-                    Log.d(TAG, "Bahasa terdeteksi (fallback blok terpanjang): "
-                            + best + " (confidence=" + bestConfidence + ")");
 
-                    if (TARGET_LANGUAGE.equals(best)) {
-                        callback.onSuccess(toUntranslatedBlocks(allBlocks));
-                        return;
-                    }
-                    translateBlocksIfModelAvailable(allBlocks, best, callback, generation);
+                    // Lapis-2: gabungan 2-3 blok terpanjang (bukan cuma satu).
+                    detectLanguageFromTopBlocksFallback(sortedForDetect, allBlocks, callback, generation);
                 })
                 .addOnFailureListener(e -> {
                     if (!isCurrent(generation)) return;
-                    Log.e(TAG, "Fallback deteksi bahasa gagal (exception), tampilkan teks asli", e);
+                    Log.e(TAG, "Fallback lapis-1 gagal (exception), coba lapis-2", e);
+                    detectLanguageFromTopBlocksFallback(sortedForDetect, allBlocks, callback, generation);
+                });
+    }
+
+    /** Fallback lapis-2: gabungan 2-3 blok terpanjang. Lihat javadoc di atas. */
+    private static void detectLanguageFromTopBlocksFallback(
+            List<Text.TextBlock> sortedForDetect, List<Text.TextBlock> allBlocks,
+            ResultCallback callback, long generation) {
+        int take = Math.min(3, sortedForDetect.size());
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < take; i++) {
+            sb.append(sortedForDetect.get(i).getText().trim()).append("\n");
+        }
+        String topBlocksText = sb.toString().trim();
+        if (topBlocksText.isEmpty()) {
+            callback.onSuccess(toUntranslatedBlocks(allBlocks));
+            return;
+        }
+
+        LanguageIdentificationOptions options = new LanguageIdentificationOptions.Builder()
+                .setConfidenceThreshold(LANGUAGE_CONFIDENCE_THRESHOLD)
+                .build();
+        LanguageIdentifier identifier = LanguageIdentification.getClient(options);
+        identifier.identifyPossibleLanguages(topBlocksText)
+                .addOnSuccessListener(candidates -> {
+                    if (!isCurrent(generation)) return;
+
+                    String best = pickBestCandidate(candidates);
+                    if (best == null) {
+                        Log.d(TAG, "Fallback lapis-2 juga gagal, tampilkan teks asli");
+                        callback.onSuccess(toUntranslatedBlocks(allBlocks));
+                        return;
+                    }
+                    Log.d(TAG, "Bahasa terdeteksi (fallback lapis-2, top-" + take + " blok): " + best);
+                    finishLanguageDetected(best, allBlocks, callback, generation);
+                })
+                .addOnFailureListener(e -> {
+                    if (!isCurrent(generation)) return;
+                    Log.e(TAG, "Fallback lapis-2 gagal (exception), tampilkan teks asli", e);
                     callback.onSuccess(toUntranslatedBlocks(allBlocks));
                 });
+    }
+
+    /** Ambil kandidat dengan confidence tertinggi selain "und"; null bila tidak ada. */
+    private static String pickBestCandidate(List<IdentifiedLanguage> candidates) {
+        String best = null;
+        float bestConfidence = 0f;
+        for (IdentifiedLanguage candidate : candidates) {
+            String code = candidate.getLanguageTag();
+            if ("und".equals(code)) continue;
+            if (candidate.getConfidence() > bestConfidence) {
+                bestConfidence = candidate.getConfidence();
+                best = code;
+            }
+        }
+        return best;
+    }
+
+    /** Lanjutkan ke translate (atau tampilkan asli bila bahasa terdeteksi = target). */
+    private static void finishLanguageDetected(
+            String languageCode, List<Text.TextBlock> allBlocks,
+            ResultCallback callback, long generation) {
+        if (TARGET_LANGUAGE.equals(languageCode)) {
+            callback.onSuccess(toUntranslatedBlocks(allBlocks));
+            return;
+        }
+        translateBlocksIfModelAvailable(allBlocks, languageCode, callback, generation);
     }
 
     private static List<Text.TextBlock> filterSignificantBlocks(List<Text.TextBlock> textBlocks) {
@@ -382,11 +449,19 @@ public final class OcrTranslateHelper {
 
     /**
      * True bila blok teks sebagian besar terdiri dari digit/simbol/spasi
-     * (mis. jam "12.34", tanggal, persentase baterai "76%", nomor urut).
+     * (mis. jam "12.34", tanggal, persentase baterai "76%", nomor urut,
+     * atau string campuran seperti "v2.3.1", "Level 76").
      * Blok semacam ini nyaris tidak membawa sinyal bahasa dan sering
      * berasal dari elemen UI sistem (status bar, jam) bukan konten
      * aplikasi — harus disingkirkan dari deteksi bahasa mode "1 layar"
      * supaya tidak mengotori hasil deteksi.
+     *
+     * Ambang rasio huruf DINAIKKAN 0.5 -> 0.7 (lebih agresif): sebelumnya
+     * blok campuran huruf+angka seperti "Level 76" (rasio huruf ~0.6)
+     * masih lolos; sekarang blok semacam itu ikut disaring, sementara teks
+     * asli berbahasa apapun (termasuk CJK/Arab, yang seluruh karakternya
+     * dihitung "huruf" oleh Character.isLetter) tetap rasio 1.0 dan lolos
+     * tanpa terpengaruh.
      */
     private static boolean isMostlyNonAlphabetic(String text) {
         int letters = 0;
@@ -398,8 +473,8 @@ public final class OcrTranslateHelper {
             if (Character.isLetter(c)) letters++;
         }
         if (total == 0) return true;
-        // Kurang dari separuh karakter (non-spasi) berupa huruf -> anggap noise.
-        return letters < total / 2.0;
+        // Kurang dari 70% karakter (non-spasi) berupa huruf -> anggap noise.
+        return letters < total * 0.7;
     }
 
     private static List<TranslatedBlock> toUntranslatedBlocks(List<Text.TextBlock> textBlocks) {
