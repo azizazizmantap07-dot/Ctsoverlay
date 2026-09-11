@@ -256,6 +256,29 @@ public class FloatingTriggerService extends Service {
         }
     }
 
+    /** Putaran segmen RGB gaya Chrome, ~2 putaran/detik, smooth. */
+    private void startChromeSpin() {
+        stopChromeSpin();
+        spinAnim = ValueAnimator.ofFloat(0f, 360f);
+        spinAnim.setDuration(500); // 2 putaran/detik
+        spinAnim.setRepeatCount(ValueAnimator.INFINITE);
+        spinAnim.setRepeatMode(ValueAnimator.RESTART);
+        spinAnim.setInterpolator(new android.view.animation.LinearInterpolator());
+        spinAnim.addUpdateListener(a -> {
+            spinAngle = (float) a.getAnimatedValue();
+            if (pillView != null) pillView.invalidate();
+        });
+        spinAnim.start();
+    }
+
+    private void stopChromeSpin() {
+        if (spinAnim != null) {
+            spinAnim.cancel();
+            spinAnim = null;
+        }
+        spinAngle = 0f;
+    }
+
     private void scheduleAutoCollapse() {
         cancelAutoCollapse();
         mainHandler.postDelayed(autoCollapseRunnable, AUTO_COLLAPSE_MS);
