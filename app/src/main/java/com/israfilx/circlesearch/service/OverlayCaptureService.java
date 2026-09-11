@@ -117,6 +117,11 @@ public class OverlayCaptureService extends Service {
         if (intent != null && ACTION_START_CAPTURE.equals(intent.getAction())) {
             resetCaptureState();
             startForegroundWithType();
+            // Sembunyikan pil SEGERA begitu capture dipicu, dari jalur manapun
+            // (floating pill sendiri, gesture Asisten Digital, dsb) — bukan
+            // hanya saat dipicu dari pil. Ini mencegah pil tetap terlihat
+            // menimpa overlay saat trigger datang dari Assist/asisten digital.
+            notifyFloatingPillHide();
             handleCaptureTrigger(intent);
         }
         return START_NOT_STICKY;
@@ -292,6 +297,37 @@ public class OverlayCaptureService extends Service {
         Intent i = new Intent(FloatingTriggerService.ACTION_OVERLAY_CLOSED);
         i.setPackage(getPackageName());
         sendBroadcast(i);
+    }
+
+    /**
+     * Sembunyikan floating pill segera saat overlay capture mulai dipicu,
+     * dari jalur manapun (termasuk gesture Asisten Digital / Assist API).
+     * Dikirim sebagai service command (bukan broadcast) langsung ke
+     * FloatingTriggerService, sama seperti yang sudah dipakai
+     * FloatingTriggerService sendiri saat pil di-tap.
+     *
+     * Hanya dikirim bila fitur floating pill sedang AKTIF (KEY_ENABLED) —
+     * kalau tidak, FloatingTriggerService tidak pernah berjalan dan kita
+     * tidak boleh membangunkannya hanya untuk memunculkan foreground
+     * notification yang tidak perlu.
+     */
+    private void notifyFloatingPillHide() {
+        boolean floatingEnabled = getSharedPreferences(
+                FloatingTriggerService.PREFS, MODE_PRIVATE)
+                .getBoolean(FloatingTriggerService.KEY_ENABLED, false);
+        if (!floatingEnabled) return;
+
+        try {
+            Intent hideIntent = new Intent(this, FloatingTriggerService.class);
+            hideIntent.setAction(FloatingTriggerService.ACTION_HIDE);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(hideIntent);
+            } else {
+                startService(hideIntent);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Gagal menyembunyikan floating pill", e);
+        }
     }
 
     private void showSelectionOverlay() {
