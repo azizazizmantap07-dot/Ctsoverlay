@@ -49,18 +49,6 @@ public class MyVoiceInteractionSession extends VoiceInteractionSession {
         handledThisShow = false;
         mainHandler.removeCallbacks(fallbackRunnable);
 
-        // PENTING: sembunyikan floating pill DI SINI, SEBELUM sistem sempat
-        // mengambil screenshot (onHandleScreenshot). Sistem Android mengambil
-        // screenshot sendiri secara internal begitu gesture assist terdeteksi,
-        // dan screenshot itu akan merekam apapun yang masih terlihat di layar
-        // saat itu — termasuk pill, kalau baru disembunyikan belakangan.
-        // Kalau pill baru disembunyikan setelah screenshot diterima (di
-        // OverlayCaptureService), pill sudah keburu "terekam" di dalam bitmap
-        // background overlay itu sendiri, sehingga tetap terlihat walau
-        // window pill aslinya sudah hilang — dan menyebabkan kedipan aneh
-        // saat overlay ditutup (window pill asli baru muncul belakangan).
-        FloatingTriggerService.hideNow(getContext());
-
         try {
             if (getWindow() != null && getWindow().getWindow() != null) {
                 getWindow().getWindow().addFlags(

@@ -93,6 +93,17 @@ public class OverlayCaptureService extends Service {
     private static final String CHANNEL_ID = "circle_search_capture";
     private static final int NOTIF_ID = 1001;
 
+    /**
+     * Durasi fade-out selectionView & bottomMenu saat overlay ditutup —
+     * harus sama dengan durasi animasi di dalam masing-masing view
+     * (SelectionOverlayView.FADE_OUT_DURATION_MS,
+     * BottomIconMenu.FADE_OUT_DURATION_MS) supaya window benar-benar
+     * di-remove tepat saat animasi visual selesai, bukan lebih awal
+     * (terlihat terpotong) atau lebih lambat (jeda kosong sebelum
+     * benar-benar hilang).
+     */
+    private static final long FADE_OUT_DURATION_MS = 160L;
+
     private WindowManager windowManager;
     private SelectionOverlayView selectionView;
     private BottomIconMenu bottomMenu;
@@ -117,11 +128,6 @@ public class OverlayCaptureService extends Service {
         if (intent != null && ACTION_START_CAPTURE.equals(intent.getAction())) {
             resetCaptureState();
             startForegroundWithType();
-            // Sembunyikan pil SEGERA begitu capture dipicu, dari jalur manapun
-            // (floating pill sendiri, gesture Asisten Digital, dsb) — bukan
-            // hanya saat dipicu dari pil. Ini mencegah pil tetap terlihat
-            // menimpa overlay saat trigger datang dari Assist/asisten digital.
-            notifyFloatingPillHide();
             handleCaptureTrigger(intent);
         }
         return START_NOT_STICKY;
@@ -299,37 +305,6 @@ public class OverlayCaptureService extends Service {
         sendBroadcast(i);
     }
 
-    /**
-     * Sembunyikan floating pill segera saat overlay capture mulai dipicu,
-     * dari jalur manapun (termasuk gesture Asisten Digital / Assist API).
-     * Dikirim sebagai service command (bukan broadcast) langsung ke
-     * FloatingTriggerService, sama seperti yang sudah dipakai
-     * FloatingTriggerService sendiri saat pil di-tap.
-     *
-     * Hanya dikirim bila fitur floating pill sedang AKTIF (KEY_ENABLED) —
-     * kalau tidak, FloatingTriggerService tidak pernah berjalan dan kita
-     * tidak boleh membangunkannya hanya untuk memunculkan foreground
-     * notification yang tidak perlu.
-     */
-    private void notifyFloatingPillHide() {
-        boolean floatingEnabled = getSharedPreferences(
-                FloatingTriggerService.PREFS, MODE_PRIVATE)
-                .getBoolean(FloatingTriggerService.KEY_ENABLED, false);
-        if (!floatingEnabled) return;
-
-        try {
-            Intent hideIntent = new Intent(this, FloatingTriggerService.class);
-            hideIntent.setAction(FloatingTriggerService.ACTION_HIDE);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(hideIntent);
-            } else {
-                startService(hideIntent);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Gagal menyembunyikan floating pill", e);
-        }
-    }
-
     private void showSelectionOverlay() {
         selectionView = new SelectionOverlayView(this, fullScreenshot);
         selectionView.setOnSelectionListener(new SelectionOverlayView.OnSelectionListener() {
@@ -387,7 +362,7 @@ public class OverlayCaptureService extends Service {
             windowManager.addView(selectionView, params);
             applyFullscreenImmersive(selectionView);
             Log.d(TAG, "Overlay seleksi ditampilkan");
-            showBottomMenu();
+            showBottomMenu(true);
             playRainbowGlowIntro();
         } catch (Exception e) {
             Log.e(TAG, "Gagal menambahkan overlay ke WindowManager — cek izin SYSTEM_ALERT_WINDOW", e);
@@ -493,8 +468,15 @@ public class OverlayCaptureService extends Service {
      * apapun, currentBounds masih null sehingga aksi berlaku ke
      * fullScreenshot) maupun untuk hasil seleksi lasso (currentBounds
      * terisi setelah onSelectionComplete, aksi berlaku ke currentCrop).
+     *
+     * @param playEnterAnimation false saat dipanggil dari
+     *                           {@link #recreateBottomMenuOnTop()} (menu
+     *                           sudah pernah muncul, hanya dibuat ulang
+     *                           untuk naik ke z-order teratas) — animasi
+     *                           masuk hanya diputar sekali di kemunculan
+     *                           pertama.
      */
-    private void showBottomMenu() {
+    private void showBottomMenu(boolean playEnterAnimation) {
         bottomMenu = new BottomIconMenu(this, new BottomIconMenu.OnActionListener() {
             @Override
             public void onSearchVisual() {
@@ -533,7 +515,7 @@ public class OverlayCaptureService extends Service {
                 Log.d(TAG, "Aksi: tutup overlay (tombol ✕)");
                 closeOverlayAndStop();
             }
-        });
+        }, playEnterAnimation);
 
         int menuType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -816,7 +798,10 @@ public class OverlayCaptureService extends Service {
             }
             bottomMenu = null;
         }
-        showBottomMenu();
+        // Menu ini sudah pernah tampil sebelumnya (bukan kemunculan
+        // pertama) — animasi masuk dilewati supaya tidak "berkedip
+        // turun-naik" tiap kali translate dijalankan ulang.
+        showBottomMenu(false);
     }
 
     /** Bersihkan overlay hasil terjemahan sebelumnya (bila ada) sebelum memproses ulang. */
@@ -916,6 +901,11 @@ public class OverlayCaptureService extends Service {
             if (closing) return;
             closing = true;
 
+            // loadingStatusView & rainbowGlowView dihapus SEGERA (tanpa
+            // menunggu fade tambahan) — keduanya murni indikator sesaat,
+            // dan rainbowGlowView sudah membawa fade-out sendiri lewat
+            // cleanup(). Yang butuh fade-out simetris dengan kemunculannya
+            // adalah selectionView & bottomMenu (lihat di bawah).
             try {
                 if (loadingStatusView != null) {
                     windowManager.removeView(loadingStatusView);
@@ -942,38 +932,76 @@ public class OverlayCaptureService extends Service {
                 Log.e(TAG, "Gagal remove translationOverlayView", e);
                 translationOverlayView = null;
             }
-            try {
-                if (selectionView != null) {
-                    selectionView.destroy();
-                    windowManager.removeView(selectionView);
+
+            // selectionView & bottomMenu di-fade-out PARALEL (durasi sama,
+            // FADE_OUT_DURATION_MS) supaya penutupan terasa smooth
+            // simetris dengan animasi kemunculannya — sebelumnya keduanya
+            // langsung snap hilang di sini. Window sesungguhnya baru
+            // di-remove & stopSelf() dipanggil setelah durasi fade
+            // terlampaui, ditunggu SEKALI lewat postDelayed (bukan
+            // saling menunggu callback masing-masing animator) supaya
+            // service tidak tertunda berbeda-beda tergantung urutan
+            // callback selesai.
+            //
+            // PENTING: field selectionView/bottomMenu SENGAJA belum
+            // di-null-kan di sini (beda dari loadingStatusView/
+            // rainbowGlowView/translationOverlayView di atas) — kalau
+            // service dibunuh paksa oleh sistem tepat selama jeda fade
+            // ini, jaring pengaman di onDestroy() masih perlu melihat
+            // kedua field ini terisi supaya window yang belum sempat
+            // di-remove tetap dibersihkan, bukan tertinggal menempel di
+            // layar. Variabel lokal di bawah hanya untuk membawa
+            // referensi ke callback postDelayed; field aslinya baru
+            // di-null-kan setelah window benar-benar dihapus.
+            final SelectionOverlayView selectionToRemove = selectionView;
+            final BottomIconMenu menuToRemove = bottomMenu;
+
+            if (selectionToRemove != null) {
+                selectionToRemove.dismissAnimated(null);
+            }
+            if (menuToRemove != null) {
+                menuToRemove.dismissAnimated(null);
+            }
+
+            long fadeDelay = (selectionToRemove != null || menuToRemove != null)
+                    ? FADE_OUT_DURATION_MS
+                    : 0L;
+
+            mainHandler.postDelayed(() -> {
+                try {
+                    if (selectionToRemove != null) {
+                        windowManager.removeView(selectionToRemove);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Gagal remove selectionView", e);
+                }
+                if (selectionView == selectionToRemove) {
                     selectionView = null;
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "Gagal remove selectionView", e);
-                selectionView = null;
-            }
-            try {
-                if (bottomMenu != null) {
-                    windowManager.removeView(bottomMenu);
+                try {
+                    if (menuToRemove != null) {
+                        windowManager.removeView(menuToRemove);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Gagal remove bottomMenu", e);
+                }
+                if (bottomMenu == menuToRemove) {
                     bottomMenu = null;
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "Gagal remove bottomMenu", e);
-                bottomMenu = null;
-            }
 
-            if (fullScreenshot != null && !fullScreenshot.isRecycled()) {
-                fullScreenshot.recycle();
-            }
-            fullScreenshot = null;
-            if (currentCrop != null && !currentCrop.isRecycled()) {
-                currentCrop.recycle();
-            }
-            currentCrop = null;
-            currentBounds = null;
+                if (fullScreenshot != null && !fullScreenshot.isRecycled()) {
+                    fullScreenshot.recycle();
+                }
+                fullScreenshot = null;
+                if (currentCrop != null && !currentCrop.isRecycled()) {
+                    currentCrop.recycle();
+                }
+                currentCrop = null;
+                currentBounds = null;
 
-            notifyFloatingOverlayClosed();
-            stopSelf();
+                notifyFloatingOverlayClosed();
+                stopSelf();
+            }, fadeDelay);
         });
     }
 

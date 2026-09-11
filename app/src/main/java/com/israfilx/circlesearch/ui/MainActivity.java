@@ -50,6 +50,14 @@ public class MainActivity extends Activity {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
+    // Disimpan sebagai field (bukan variabel lokal di startTitleRgbAnimation)
+    // supaya bisa di-cancel eksplisit di onDestroy() — keduanya infinite-loop
+    // dan sebelumnya terus jalan menempel ke TextView lama walau activity
+    // sudah di-recreate (rotasi layar, dibunuh & display ulang sistem, dst),
+    // menyebabkan animator leak yang menumpuk tiap kali halaman ini dibuka.
+    private ValueAnimator titleColorAnim;
+    private ValueAnimator titleGlowPulseAnim;
+
     private TextView statusOverlay;
     private TextView statusAssistant;
     private TextView statusRoot;
@@ -227,31 +235,31 @@ public class MainActivity extends Activity {
         int yellow = Color.rgb(255, 210, 30);
         int green = Color.rgb(50, 220, 110);
 
-        ValueAnimator colorAnim = ValueAnimator.ofObject(
+        titleColorAnim = ValueAnimator.ofObject(
                 new ArgbEvaluator(), red, yellow, green, red);
-        colorAnim.setDuration(5000);
-        colorAnim.setRepeatCount(ValueAnimator.INFINITE);
-        colorAnim.setRepeatMode(ValueAnimator.RESTART);
-        colorAnim.addUpdateListener(a -> {
+        titleColorAnim.setDuration(5000);
+        titleColorAnim.setRepeatCount(ValueAnimator.INFINITE);
+        titleColorAnim.setRepeatMode(ValueAnimator.RESTART);
+        titleColorAnim.addUpdateListener(a -> {
             int color = (int) a.getAnimatedValue();
             title.setTextColor(color);
             float radius = title.getTag() != null ? (float) title.getTag() : 18f;
             title.setShadowLayer(radius, 0f, 0f, color);
         });
-        colorAnim.start();
+        titleColorAnim.start();
 
         // Radius glow "bernapas" — dianimasikan terpisah agar independen dari warna
-        ValueAnimator glowPulse = ValueAnimator.ofFloat(14f, 26f);
-        glowPulse.setDuration(1400);
-        glowPulse.setRepeatCount(ValueAnimator.INFINITE);
-        glowPulse.setRepeatMode(ValueAnimator.REVERSE);
-        glowPulse.addUpdateListener(a -> {
+        titleGlowPulseAnim = ValueAnimator.ofFloat(14f, 26f);
+        titleGlowPulseAnim.setDuration(1400);
+        titleGlowPulseAnim.setRepeatCount(ValueAnimator.INFINITE);
+        titleGlowPulseAnim.setRepeatMode(ValueAnimator.REVERSE);
+        titleGlowPulseAnim.addUpdateListener(a -> {
             float radius = (float) a.getAnimatedValue();
             title.setTag(radius);
             int currentColor = title.getCurrentTextColor();
             title.setShadowLayer(radius, 0f, 0f, currentColor);
         });
-        glowPulse.start();
+        titleGlowPulseAnim.start();
     }
 
     protected void onResume() {
@@ -259,6 +267,28 @@ public class MainActivity extends Activity {
         refreshPermissionStatus();
         refreshLanguageStatus();
         ensureFloatingRunning();
+    }
+
+    /**
+     * Hentikan animasi judul (RGB + glow "bernapas") dan callback tertunda
+     * lain begitu activity ini dihancurkan. Sebelumnya kedua ValueAnimator
+     * ini infinite-loop dan tidak pernah di-cancel — activity yang
+     * di-recreate (rotasi layar, dibunuh & dipulihkan sistem, dsb.)
+     * meninggalkan animator lama tetap berjalan menempel ke TextView lama,
+     * menumpuk sebagai kebocoran tiap kali halaman pengaturan ini dibuka.
+     */
+    @Override
+    protected void onDestroy() {
+        if (titleColorAnim != null) {
+            titleColorAnim.cancel();
+            titleColorAnim = null;
+        }
+        if (titleGlowPulseAnim != null) {
+            titleGlowPulseAnim.cancel();
+            titleGlowPulseAnim = null;
+        }
+        mainHandler.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 
     /** Jika user sebelumnya mengaktifkan floating, pastikan service jalan. */

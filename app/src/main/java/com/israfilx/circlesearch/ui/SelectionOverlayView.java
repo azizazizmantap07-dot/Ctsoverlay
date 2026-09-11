@@ -1,5 +1,7 @@
 package com.israfilx.circlesearch.ui;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -75,6 +77,7 @@ public class SelectionOverlayView extends View {
     private ValueAnimator marchingAntsAnimator;
 
     private static final float MIN_DRAG_DISTANCE_PX = 24f;
+    private static final long FADE_OUT_DURATION_MS = 160L;
 
     public SelectionOverlayView(Context context, Bitmap frozenScreenshot) {
         super(context);
@@ -237,9 +240,42 @@ public class SelectionOverlayView extends View {
         return lassoPath;
     }
 
+    /** Hentikan animator internal (marching ants). Dipanggil sebelum view benar-benar dilepas. */
     public void destroy() {
         if (marchingAntsAnimator != null) {
             marchingAntsAnimator.cancel();
         }
+    }
+
+    /**
+     * Fade-out singkat sebelum view ini dilepas dari WindowManager, supaya
+     * penutupan overlay (tombol ✕, tap-di-luar tanpa seleksi, dst) terasa
+     * smooth simetris dengan fade-in kemunculannya — sebelumnya overlay ini
+     * langsung hilang seketika (snap) saat ditutup, berbeda dari
+     * TranslationOverlayView/LoadingStatusView yang sudah pakai fade-out.
+     *
+     * marchingAntsAnimator dibatalkan lebih dulu supaya tidak ada
+     * invalidate() sia-sia selama fade berjalan.
+     *
+     * @param onEnd dipanggil setelah animasi selesai — pemanggil (Service)
+     *              yang bertanggung jawab benar-benar me-remove view dari
+     *              WindowManager di sini, sama seperti pola dismissAnimated
+     *              pada TranslationOverlayView.
+     */
+    public void dismissAnimated(Runnable onEnd) {
+        if (marchingAntsAnimator != null) {
+            marchingAntsAnimator.cancel();
+        }
+        animate()
+                .alpha(0f)
+                .setDuration(FADE_OUT_DURATION_MS)
+                .setInterpolator(new DecelerateInterpolator())
+                .setListener(new AnimatorListenerAdapter() {
+                    @Override
+                    public void onAnimationEnd(Animator animation) {
+                        if (onEnd != null) onEnd.run();
+                    }
+                })
+                .start();
     }
 }

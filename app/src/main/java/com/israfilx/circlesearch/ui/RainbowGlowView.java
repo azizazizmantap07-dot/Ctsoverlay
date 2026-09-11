@@ -145,6 +145,15 @@ public class RainbowGlowView extends View {
     }
 
     private void startFadeOut() {
+        // Hentikan putaran hue lebih awal (bukan menunggu fade selesai
+        // lewat cleanup()) — sebelumnya hueAnimator infinite terus memicu
+        // perhitungan warna tiap frame selama ~260ms fade berjalan padahal
+        // hasilnya sudah tidak terlihat (alpha menuju 0), kerja CPU yang
+        // tidak perlu tepat di momen transisi paling padat.
+        if (hueAnimator != null) {
+            hueAnimator.cancel();
+        }
+
         ValueAnimator fade = ValueAnimator.ofFloat(1f, 0f);
         fade.setDuration(FADE_DURATION_MS);
         fade.addUpdateListener(a -> {

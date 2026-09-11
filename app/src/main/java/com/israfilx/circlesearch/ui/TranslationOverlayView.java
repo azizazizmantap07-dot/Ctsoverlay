@@ -154,6 +154,19 @@ public class TranslationOverlayView extends View {
     }
 
     /**
+     * Batalkan callback flashBlock() tertunda (bila ada) begitu view ini
+     * dilepas dari WindowManager. Sebelumnya, tap cepat pada sebuah blok
+     * diikuti tap ✕ dalam <220ms membuat postDelayed tetap jalan dan
+     * memanggil invalidate() pada view yang sudah detached — tidak crash,
+     * tapi kerja sia-sia dan celah timing yang tidak perlu.
+     */
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        mainHandler.removeCallbacksAndMessages(null);
+    }
+
+    /**
      * Tutup overlay ini dengan animasi fade-out singkat, baru panggil
      * dismissListener setelah animasi selesai. Pemanggil (Service)
      * menafsirkan callback ini sebagai "kembali ke menu utama", bukan

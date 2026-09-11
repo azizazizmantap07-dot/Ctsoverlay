@@ -58,72 +58,13 @@ public class FloatingTriggerService extends Service {
     public static final String KEY_ENABLED = "enabled";
     public static final String KEY_POS_Y = "pos_y";
 
-    /**
-     * Instance service yang sedang berjalan (null bila tidak aktif). Dipakai
-     * oleh {@link #hideNow(Context)} agar pill bisa disembunyikan SECARA
-     * SINKRON dan sesegera mungkin — sebelum sistem sempat mengambil
-     * screenshot Assist, yang kalau kalah cepat akan membuat pill "terekam"
-     * permanen di dalam bitmap screenshot walau window pill aslinya sudah
-     * dihapus. Mengandalkan startService() saja tidak cukup cepat untuk
-     * kasus ini karena ada latensi dispatch antar-komponen Android.
-     */
-    private static volatile FloatingTriggerService activeInstance;
-
-    /**
-     * Sembunyikan pill sesegera mungkin dari luar, tanpa menunggu siklus
-     * onStartCommand(). Dipanggil dari {@link MyVoiceInteractionSession#onShow}
-     * agar menang lomba dengan pengambilan screenshot sistem saat trigger
-     * datang dari Asisten Digital.
-     *
-     * - Bila service sudah berjalan (activeInstance != null): panggil
-     *   hidePillInstant() langsung di main thread, sinkron.
-     * - Bila service belum berjalan tapi fitur pill sedang aktif
-     *   (KEY_ENABLED): start service dengan ACTION_HIDE seperti biasa —
-     *   ini kasus langka (pill belum pernah ditampilkan sama sekali) jadi
-     *   tidak ada window pill yang perlu buru-buru dihapus.
-     * PENTING soal animasi: hideNow() SENGAJA memanggil hidePillInstant()
-     * (tanpa animasi shrink) alih-alih hidePillAnimated(). Ini dipakai
-     * khusus untuk kasus race dengan screenshot Assist API — kalau pakai
-     * animasi di sini, window pill akan tetap ada di layar selama animasi
-     * berjalan (150ms), cukup lama untuk tetap kerekam di screenshot
-     * sistem. Animasi shrink yang smooth tetap dipakai untuk semua jalur
-     * hide LAINNYA (tap pill sendiri, toggle manual) lewat hidePillAnimated().
-     */
-    public static void hideNow(Context context) {
-        FloatingTriggerService inst = activeInstance;
-        if (inst != null) {
-            if (Looper.myLooper() == Looper.getMainLooper()) {
-                inst.hidePillInstant();
-            } else {
-                inst.mainHandler.post(inst::hidePillInstant);
-            }
-            return;
-        }
-
-        boolean floatingEnabled = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .getBoolean(KEY_ENABLED, false);
-        if (!floatingEnabled) return;
-
-        try {
-            Intent hideIntent = new Intent(context, FloatingTriggerService.class);
-            hideIntent.setAction(ACTION_HIDE);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(hideIntent);
-            } else {
-                context.startService(hideIntent);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "hideNow: gagal start service untuk hide", e);
-        }
-    }
-
     private static final String CHANNEL_ID = "floating_trigger";
     private static final int NOTIF_ID = 1002;
     private static final long AUTO_COLLAPSE_MS = 5000L;
     private static final long ANIM_MS = 220L;
     private static final long COLOR_CYCLE_MS = 10_000L;
-    /** Durasi animasi singkat shrink (hide) / grow (show) pill. */
-    private static final long HIDE_SHOW_ANIM_MS = 150L;
+    /** Durasi animasi hide/show pil (memendek/memanjang). Sedikit lebih lama agar terasa super smooth. */
+    private static final long VISIBILITY_ANIM_MS = 260L;
 
     /** Ukuran visual pil. */
     private static final int VISUAL_PILL_W_DP = 5; // dikurangi 4dp dari 9 agar lebih tipis
@@ -157,8 +98,10 @@ public class FloatingTriggerService extends Service {
     /** Denyut skala bola tengah (0..1, mind-breathing effect). */
     private float corePulsePhase = 0f;
     private ValueAnimator corePulseAnim;
-    /** Animator untuk shrink (hide) / grow (show) pill. */
-    private ValueAnimator hideShowAnim;
+    /** Animasi hide/show pil: memendek→hilang saat hide, memanjang dari pendek saat show. */
+    private ValueAnimator visibilityAnim;
+    /** true selagi animasi hide berjalan, untuk mencegah addView baru menimpa sebelum removeView selesai. */
+    private boolean hidingInProgress = false;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable autoCollapseRunnable = () -> {
@@ -212,7 +155,6 @@ public class FloatingTriggerService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        activeInstance = this;
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
         savedY = sp.getInt(KEY_POS_Y, dp(200));
@@ -240,7 +182,7 @@ public class FloatingTriggerService extends Service {
         if (ACTION_HIDE.equals(action)) {
             cancelAutoCollapse();
             stopColorCycle();
-            hidePillAnimated();
+            hidePill();
         } else {
             showPill();
         }
@@ -262,7 +204,7 @@ public class FloatingTriggerService extends Service {
     }
 
     private void showPill() {
-        if (pillView != null) return;
+        if (pillView != null && !hidingInProgress) return;
         if (!android.provider.Settings.canDrawOverlays(this)) {
             Log.e(TAG, "Izin overlay belum diberikan");
             Toast.makeText(this, "Aktifkan izin Overlay dulu", Toast.LENGTH_SHORT).show();
@@ -270,16 +212,15 @@ public class FloatingTriggerService extends Service {
             return;
         }
 
-        cancelHideShowAnim();
+        cancelVisibilityAnim();
+        hidingInProgress = false;
         expanded = false;
         animating = false;
         colorIndex = 0;
         pillView = new PillView(this);
         pillView.setFillColor(CYCLE_COLORS[0]);
-        // Mulai dari kondisi "memendek total" (hideProgress=1) lalu
-        // dianimasikan memanjang ke ukuran normal begitu window ditambahkan
-        // — kebalikan dari animasi shrink di hidePillAnimated().
-        pillView.setHideProgress(1f);
+        // Mulai dari kondisi "pendek/tersembunyi" agar bisa dianimasikan memanjang.
+        pillView.setVisibilityProgress(0f);
 
         // Window = area sentuh (lebih besar); visual digambar lebih kecil di dalam
         int touchW = dp(TOUCH_PILL_W_DP);
@@ -302,7 +243,7 @@ public class FloatingTriggerService extends Service {
         try {
             windowManager.addView(pillView, params);
             startColorCycle();
-            animateShowGrow();
+            animateShowPill();
             Log.d(TAG, "Pil ditampilkan di y=" + params.y);
         } catch (Exception e) {
             Log.e(TAG, "Gagal menampilkan pil", e);
@@ -310,41 +251,91 @@ public class FloatingTriggerService extends Service {
         }
     }
 
-    /** Animasi grow: pill memanjang dari pendek (hideProgress=1) ke ukuran normal (0). */
-    private void animateShowGrow() {
+    /** Animasi munculnya pil: dari pendek (tak terlihat) memanjang smooth ke ukuran asli. */
+    private void animateShowPill() {
         if (pillView == null) return;
-        cancelHideShowAnim();
-        final PillView view = pillView;
-        hideShowAnim = ValueAnimator.ofFloat(1f, 0f);
-        hideShowAnim.setDuration(HIDE_SHOW_ANIM_MS);
-        hideShowAnim.setInterpolator(new DecelerateInterpolator());
-        hideShowAnim.addUpdateListener(a -> {
-            view.setHideProgress((float) a.getAnimatedValue());
-            view.invalidate();
+        cancelVisibilityAnim();
+
+        visibilityAnim = ValueAnimator.ofFloat(0f, 1f);
+        visibilityAnim.setDuration(VISIBILITY_ANIM_MS);
+        visibilityAnim.setInterpolator(new android.view.animation.PathInterpolator(0.22f, 1f, 0.36f, 1f));
+        visibilityAnim.addUpdateListener(a -> {
+            if (pillView == null) return;
+            pillView.setVisibilityProgress((float) a.getAnimatedValue());
+            pillView.invalidate();
         });
-        hideShowAnim.addListener(new AnimatorListenerAdapter() {
-            @Override
-            public void onAnimationEnd(Animator animation) {
-                if (hideShowAnim == animation) {
-                    hideShowAnim = null;
-                }
-            }
-        });
-        hideShowAnim.start();
+        visibilityAnim.start();
     }
 
     /**
-     * Hapus window pill SEGERA tanpa animasi. Dipakai untuk jalur yang
-     * punya race dengan screenshot sistem (hideNow() dari Asisten Digital,
-     * triggerCapture() dari tap pill) atau saat service benar-benar akan
-     * mati (onDestroy) — di semua kasus ini window harus benar-benar
-     * hilang secepat mungkin, animasi apa pun hanya akan menunda itu.
+     * Sembunyikan pil dengan animasi: pil memendek secara vertikal dari tengah
+     * hingga hilang sepenuhnya, baru kemudian window benar-benar dilepas.
      */
-    private void hidePillInstant() {
+    private void hidePill() {
         cancelAutoCollapse();
         stopColorCycle();
         stopChromeSpin();
-        cancelHideShowAnim();
+        cancelVisibilityAnim();
+
+        if (pillView == null) {
+            expanded = false;
+            animating = false;
+            hidingInProgress = false;
+            return;
+        }
+
+        // Animasi memendek berlaku dari bentuk apa pun saat ini (pil ataupun tombol
+        // bulat saat expanded) — tidak perlu dipaksa balik ke bentuk pil dulu.
+        final PillView viewToRemove = pillView;
+        hidingInProgress = true;
+
+        visibilityAnim = ValueAnimator.ofFloat(1f, 0f);
+        visibilityAnim.setDuration(VISIBILITY_ANIM_MS);
+        visibilityAnim.setInterpolator(new android.view.animation.PathInterpolator(0.4f, 0f, 0.2f, 1f));
+        visibilityAnim.addUpdateListener(a -> {
+            viewToRemove.setVisibilityProgress((float) a.getAnimatedValue());
+            viewToRemove.invalidate();
+        });
+        visibilityAnim.addListener(new AnimatorListenerAdapter() {
+            private boolean finished = false;
+
+            private void finishRemoval() {
+                if (finished) return; // cegah dobel-eksekusi (onAnimationCancel diikuti onAnimationEnd)
+                finished = true;
+                try {
+                    windowManager.removeView(viewToRemove);
+                } catch (Exception ignored) {
+                }
+                if (pillView == viewToRemove) {
+                    pillView = null;
+                }
+                hidingInProgress = false;
+            }
+
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                finishRemoval();
+            }
+
+            @Override
+            public void onAnimationCancel(Animator animation) {
+                // Dibatalkan (mis. showPill dipanggil lagi) — pastikan view lama tetap dilepas
+                // supaya tidak ada view yatim yang menggantung di WindowManager.
+                finishRemoval();
+            }
+        });
+        visibilityAnim.start();
+
+        expanded = false;
+        animating = false;
+    }
+
+    /** Hentikan pil seketika tanpa animasi — dipakai saat service benar-benar dihentikan (onDestroy). */
+    private void hidePillImmediate() {
+        cancelAutoCollapse();
+        stopColorCycle();
+        stopChromeSpin();
+        cancelVisibilityAnim();
         if (pillView != null) {
             try {
                 windowManager.removeView(pillView);
@@ -354,62 +345,20 @@ public class FloatingTriggerService extends Service {
         }
         expanded = false;
         animating = false;
+        hidingInProgress = false;
     }
 
     /**
-     * Sembunyikan pill dengan animasi singkat: memendek secara vertikal
-     * (shrink-to-center, digambar oleh PillView lewat hideProgress) baru
-     * lalu benar-benar dihapus dari window. Dipakai untuk jalur yang TIDAK
-     * punya race dengan screenshot manapun (toggle manual fitur floating
-     * pill lewat MainActivity).
-     *
-     * Window (hit-box) SENGAJA tidak diubah ukurannya selama animasi —
-     * hanya visualnya (lewat hideProgress) yang memendek secara terpusat.
-     * Ini membuat animasi terlihat menyusut dari tengah, bukan "tertarik"
-     * ke salah satu sisi seperti yang terjadi bila window-nya sendiri
-     * diperkecil (karena window pakai gravity TOP, bukan CENTER).
+     * Batalkan animasi hide/show pil yang sedang berjalan (jika ada).
+     * Sengaja TIDAK melepas listener sebelum cancel(), supaya jika yang dibatalkan
+     * adalah animasi hide, listener onAnimationCancel tetap sempat membersihkan
+     * (removeView) view lama — mencegah view yatim menggantung di WindowManager.
      */
-    private void hidePillAnimated() {
-        cancelAutoCollapse();
-        stopColorCycle();
-        stopChromeSpin();
-
-        if (pillView == null || params == null) {
-            hidePillInstant();
-            return;
-        }
-
-        cancelHideShowAnim();
-        final PillView view = pillView;
-        hideShowAnim = ValueAnimator.ofFloat(view.getHideProgress(), 1f);
-        hideShowAnim.setDuration(HIDE_SHOW_ANIM_MS);
-        hideShowAnim.setInterpolator(new DecelerateInterpolator());
-        hideShowAnim.addUpdateListener(a -> {
-            view.setHideProgress((float) a.getAnimatedValue());
-            view.invalidate();
-        });
-        hideShowAnim.addListener(new AnimatorListenerAdapter() {
-            @Override
-            public void onAnimationEnd(Animator animation) {
-                hideShowAnim = null;
-                try {
-                    windowManager.removeView(view);
-                } catch (Exception ignored) {
-                }
-                if (pillView == view) {
-                    pillView = null;
-                }
-                expanded = false;
-                animating = false;
-            }
-        });
-        hideShowAnim.start();
-    }
-
-    private void cancelHideShowAnim() {
-        if (hideShowAnim != null) {
-            hideShowAnim.cancel();
-            hideShowAnim = null;
+    private void cancelVisibilityAnim() {
+        if (visibilityAnim != null) {
+            ValueAnimator anim = visibilityAnim;
+            visibilityAnim = null;
+            anim.cancel();
         }
     }
 
@@ -585,11 +534,7 @@ public class FloatingTriggerService extends Service {
     private void triggerCapture() {
         Log.d(TAG, "Trigger capture dari floating button");
         cancelAutoCollapse();
-        // Instant (tanpa animasi shrink): capture (root screencap / a11y
-        // takeScreenshot) bisa mulai mengambil gambar layar segera setelah
-        // ini, jadi window pill harus benar-benar hilang duluan — sama
-        // alasannya dengan hideNow() untuk trigger dari Asisten Digital.
-        hidePillInstant();
+        hidePill();
 
         Intent serviceIntent = new Intent(this, OverlayCaptureService.class);
         serviceIntent.setAction(OverlayCaptureService.ACTION_START_CAPTURE);
@@ -618,16 +563,13 @@ public class FloatingTriggerService extends Service {
 
     @Override
     public void onDestroy() {
-        if (activeInstance == this) {
-            activeInstance = null;
-        }
         cancelAutoCollapse();
         stopColorCycle();
         try {
             unregisterReceiver(overlayClosedReceiver);
         } catch (Exception ignored) {
         }
-        hidePillInstant();
+        hidePillImmediate();
         super.onDestroy();
     }
 
@@ -646,15 +588,8 @@ public class FloatingTriggerService extends Service {
         private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private boolean isExpanded = false;
         private float progress = 0f;
-        /**
-         * Progress animasi tampil/sembunyi pill (0 = ukuran penuh normal,
-         * 1 = memendek total sampai tak terlihat). Independen dari
-         * {@link #progress} (yang khusus transisi bentuk pil → tombol
-         * bulat) — dipakai untuk animasi shrink-vertikal saat pill akan
-         * di-remove dari window, dan grow-vertikal saat pill baru
-         * ditambahkan kembali.
-         */
-        private float hideProgress = 0f;
+        /** 0 = pil tersembunyi (memendek total dari tengah), 1 = ukuran penuh normal. */
+        private float visibilityProgress = 1f;
         private float downX, downY;
         private int startParamX, startParamY;
         private boolean moved;
@@ -682,12 +617,8 @@ public class FloatingTriggerService extends Service {
             progress = Math.max(0f, Math.min(1f, p));
         }
 
-        void setHideProgress(float p) {
-            hideProgress = Math.max(0f, Math.min(1f, p));
-        }
-
-        float getHideProgress() {
-            return hideProgress;
+        void setVisibilityProgress(float p) {
+            visibilityProgress = Math.max(0f, Math.min(1f, p));
         }
 
         private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
@@ -715,7 +646,8 @@ public class FloatingTriggerService extends Service {
             float w = getWidth();
             float h = getHeight();
             if (w <= 0 || h <= 0) return;
-            if (hideProgress >= 1f) return; // benar-benar tak terlihat, tidak perlu digambar
+
+            if (visibilityProgress <= 0f) return; // tersembunyi total — tidak ada yang digambar
 
             float visPillW = dp(VISUAL_PILL_W_DP);
             float visPillH = dp(VISUAL_PILL_H_DP);
@@ -724,17 +656,16 @@ public class FloatingTriggerService extends Service {
             // Interpolasi ukuran: pil → lingkaran
             float curW = visPillW + (visBtn - visPillW) * progress;
             float curH = visPillH + (visBtn - visPillH) * progress;
-
-            // Animasi tampil/sembunyi: tinggi visual memendek menuju 0 secara
-            // terpusat (shrink-to-center), lebar tidak berubah. Dipakai saat
-            // pill akan dihapus dari window (memendek lalu hilang) maupun
-            // saat baru ditambahkan kembali (mulai pendek lalu memanjang).
-            curH *= (1f - hideProgress);
-
             float left = (w - curW) * progress * 0.5f;
             float top = (h - curH) * 0.5f;
             float cx = left + curW / 2f;
             float cy = top + curH / 2f;
+
+            // Animasi hide/show: tinggi mengecil dari titik tengah (memendek simetris)
+            // hingga hilang, tanpa mengubah lebar maupun bentuk (pil tetap pil, bulat tetap bulat).
+            curH *= visibilityProgress;
+            top = cy - curH / 2f;
+
             float radius = Math.min(curW, curH) / 2f;
 
             if (progress < 0.35f) {
@@ -785,7 +716,7 @@ public class FloatingTriggerService extends Service {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
-            if (animating) return true;
+            if (animating || hidingInProgress || visibilityProgress < 0.999f) return true;
 
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:

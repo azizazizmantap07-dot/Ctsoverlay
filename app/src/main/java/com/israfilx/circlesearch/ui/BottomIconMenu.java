@@ -1,5 +1,7 @@
 package com.israfilx.circlesearch.ui;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
@@ -44,6 +46,20 @@ public class BottomIconMenu extends LinearLayout {
     }
 
     public BottomIconMenu(Context context, OnActionListener listener) {
+        this(context, listener, true);
+    }
+
+    /**
+     * @param playEnterAnimation false saat instance ini dibuat ulang hanya
+     *                           untuk naik ke z-order teratas (lihat
+     *                           OverlayCaptureService#recreateBottomMenuOnTop),
+     *                           bukan kemunculan pertama menu. Sebelumnya
+     *                           animasi fade+slide-up ini replay setiap kali
+     *                           translate dijalankan ulang, membuat menu
+     *                           terlihat "berkedip turun-naik" alih-alih
+     *                           diam di tempat.
+     */
+    public BottomIconMenu(Context context, OnActionListener listener, boolean playEnterAnimation) {
         super(context);
         setOrientation(HORIZONTAL);
         setGravity(Gravity.CENTER);
@@ -97,15 +113,19 @@ public class BottomIconMenu extends LinearLayout {
         addView(closeIcon);
 
         // Animasi masuk halus (fade + slide-up sedikit) supaya kemunculan
-        // menu tidak terasa "muncul tiba-tiba" (snap).
-        setAlpha(0f);
-        setTranslationY(dp(24));
-        animate()
-                .alpha(1f)
-                .translationY(0f)
-                .setDuration(220)
-                .setInterpolator(new DecelerateInterpolator())
-                .start();
+        // menu tidak terasa "muncul tiba-tiba" (snap) — hanya diputar pada
+        // kemunculan pertama menu, bukan setiap kali instance dibuat ulang
+        // untuk naik ke z-order teratas.
+        if (playEnterAnimation) {
+            setAlpha(0f);
+            setTranslationY(dp(24));
+            animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setDuration(220)
+                    .setInterpolator(new DecelerateInterpolator())
+                    .start();
+        }
     }
 
     private TextView makeIconButton(String glyph) {
@@ -136,5 +156,32 @@ public class BottomIconMenu extends LinearLayout {
 
     private float dp(float value) {
         return value * getResources().getDisplayMetrics().density;
+    }
+
+    private static final long FADE_OUT_DURATION_MS = 160L;
+
+    /**
+     * Fade-out singkat (kebalikan animasi masuk di constructor) sebelum
+     * menu ini dilepas dari WindowManager — sebelumnya menu langsung
+     * hilang seketika (snap) saat overlay ditutup, tidak simetris dengan
+     * animasi kemunculannya.
+     *
+     * @param onEnd dipanggil setelah animasi selesai; pemanggil (Service)
+     *              yang bertanggung jawab me-remove view ini dari
+     *              WindowManager di sana.
+     */
+    public void dismissAnimated(Runnable onEnd) {
+        animate()
+                .alpha(0f)
+                .translationY(dp(24))
+                .setDuration(FADE_OUT_DURATION_MS)
+                .setInterpolator(new DecelerateInterpolator())
+                .setListener(new AnimatorListenerAdapter() {
+                    @Override
+                    public void onAnimationEnd(Animator animation) {
+                        if (onEnd != null) onEnd.run();
+                    }
+                })
+                .start();
     }
 }
