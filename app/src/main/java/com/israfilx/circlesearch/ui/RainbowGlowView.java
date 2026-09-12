@@ -57,6 +57,9 @@ public class RainbowGlowView extends View {
     private OnFinishedListener finishedListener;
     private ValueAnimator travelAnimator;
     private ValueAnimator hueAnimator;
+    private ValueAnimator fadeAnimator;
+    /** Callback startFadeOut() yang dijadwalkan via postDelayed; disimpan agar bisa dibatalkan di cleanup(). */
+    private Runnable pendingFadeOut;
 
     public RainbowGlowView(Context context) {
         super(context);
@@ -129,7 +132,8 @@ public class RainbowGlowView extends View {
         travelAnimator.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
-                postDelayed(RainbowGlowView.this::startFadeOut, HOLD_DURATION_MS);
+                pendingFadeOut = RainbowGlowView.this::startFadeOut;
+                postDelayed(pendingFadeOut, HOLD_DURATION_MS);
             }
         });
 
@@ -145,6 +149,8 @@ public class RainbowGlowView extends View {
     }
 
     private void startFadeOut() {
+        pendingFadeOut = null;
+
         // Hentikan putaran hue lebih awal (bukan menunggu fade selesai
         // lewat cleanup()) — sebelumnya hueAnimator infinite terus memicu
         // perhitungan warna tiap frame selama ~260ms fade berjalan padahal
@@ -154,26 +160,38 @@ public class RainbowGlowView extends View {
             hueAnimator.cancel();
         }
 
-        ValueAnimator fade = ValueAnimator.ofFloat(1f, 0f);
-        fade.setDuration(FADE_DURATION_MS);
-        fade.addUpdateListener(a -> {
+        fadeAnimator = ValueAnimator.ofFloat(1f, 0f);
+        fadeAnimator.setDuration(FADE_DURATION_MS);
+        fadeAnimator.addUpdateListener(a -> {
             alpha = (float) a.getAnimatedValue();
             invalidate();
         });
-        fade.addListener(new AnimatorListenerAdapter() {
+        fadeAnimator.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
                 cleanup();
                 if (finishedListener != null) finishedListener.onFinished();
             }
         });
-        fade.start();
+        fadeAnimator.start();
     }
 
-    /** Hentikan seluruh animasi lebih awal (mis. overlay ditutup manual sebelum animasi selesai). */
+    /**
+     * Hentikan seluruh animasi & callback tertunda lebih awal (mis. overlay
+     * ditutup manual sebelum animasi selesai). Termasuk membatalkan
+     * postDelayed(startFadeOut) yang mungkin masih menunggu di antrean —
+     * sebelumnya callback itu tetap tereksekusi walau cleanup() sudah
+     * dipanggil lebih dulu, memicu animasi fade baru pada view yang
+     * seharusnya sudah "mati".
+     */
     public void cleanup() {
+        if (pendingFadeOut != null) {
+            removeCallbacks(pendingFadeOut);
+            pendingFadeOut = null;
+        }
         if (travelAnimator != null) travelAnimator.cancel();
         if (hueAnimator != null) hueAnimator.cancel();
+        if (fadeAnimator != null) fadeAnimator.cancel();
     }
 
     @Override

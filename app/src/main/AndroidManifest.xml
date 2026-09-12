@@ -14,10 +14,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
-    <!-- Simpan crop sementara untuk dikirim via Intent (pencarian visual
-         non-Google — lihat ImageSearchShareUtil) -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-
     <!-- ML Kit Translate perlu ini untuk mengunduh model bahasa (sekali
          per pasangan bahasa; setelah terunduh, translate bekerja offline).
          OCR (Text Recognition) dan deteksi bahasa tidak butuh internet. -->
@@ -26,30 +22,6 @@
 
     <!-- Minta user menonaktifkan optimasi baterai agar service tidak di-kill -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-
-    <!--
-        Android 11+ membatasi visibilitas package lain (package visibility).
-        Deklarasi ini wajib agar getPackageInfo()/resolveActivity() di
-        ImageSearchShareUtil bisa mendeteksi & menargetkan app pencarian
-        visual (Yandex, Bing/Microsoft Start, Google/Google Lens sebagai
-        prioritas terakhir — lihat ImageSearchShareUtil untuk urutan)
-        bila terpasang. Query intent SEND generik di bawah adalah
-        fallback chooser umum — TIDAK diarahkan ke package tertentu,
-        murni supaya sistem bisa menampilkan semua app yang sanggup
-        menerima gambar.
-    -->
-    <queries>
-        <package android:name="ru.yandex.searchplugin" />
-        <package android:name="ru.yandex.browser" />
-        <package android:name="com.microsoft.bing" />
-        <package android:name="com.microsoft.amp.apps.bingfeed" />
-        <package android:name="com.google.android.googlequicksearchbox" />
-        <package android:name="com.google.ar.lens" />
-        <intent>
-            <action android:name="android.intent.action.SEND" />
-            <data android:mimeType="image/png" />
-        </intent>
-    </queries>
 
     <application
         android:label="Circle Search Overlay"
@@ -82,9 +54,8 @@
         </activity>
 
         <!--
-            WebView in-app untuk reverse image search (Yandex / Bing / Google).
-            Dibuka dari OverlayCaptureService saat opsi
-            "Pencarian visual di dalam aplikasi" aktif.
+            WebView in-app untuk reverse image search (Google Lens / Bing).
+            Dibuka dari OverlayCaptureService saat aksi "Cari" dipicu.
         -->
         <activity
             android:name=".ui.ImageSearchWebActivity"
@@ -155,7 +126,6 @@
                 android:value="screen-overlay-capture" />
         </service>
 
-
         <service
             android:name=".service.FloatingTriggerService"
             android:exported="false"
@@ -180,8 +150,7 @@
 
         <!--
             FileProvider: dibutuhkan agar bitmap hasil crop (disimpan di
-            cache internal) bisa dibagikan dengan aman ke app lain (target
-            pencarian visual non-Google, lihat ImageSearchShareUtil) lewat
+            cache internal) bisa diberikan ke ImageSearchWebActivity lewat
             content:// URI, sesuai kewajiban Android 7+.
         -->
         <provider

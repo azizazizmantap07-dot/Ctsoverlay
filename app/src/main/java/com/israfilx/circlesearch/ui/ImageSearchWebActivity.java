@@ -107,17 +107,21 @@ public class ImageSearchWebActivity extends Activity {
             Bitmap bmp = decodeBitmap(contentUri);
             if (bmp == null) {
                 mainHandler.post(() -> {
+                    if (isFinishing() || isDestroyed()) return;
                     statusText.setText("Gagal membaca gambar");
                     Toast.makeText(this, "Gagal membaca gambar", Toast.LENGTH_SHORT).show();
                 });
                 return;
             }
             sourceBitmap = bmp;
-            mainHandler.post(() -> statusText.setText("Mengunggah gambar (host tercepat)…"));
+            mainHandler.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                statusText.setText("Mengunggah gambar (host tercepat)…");
+            });
 
             String uploaded = ImageSearchUploader.uploadToImageHost(bmp);
             mainHandler.post(() -> {
-                if (isFinishing()) return;
+                if (isFinishing() || isDestroyed()) return;
                 if (uploaded == null) {
                     statusText.setText("Gagal mengunggah gambar.\nPeriksa koneksi internet lalu coba lagi.");
                     Toast.makeText(this, "Upload gagal", Toast.LENGTH_LONG).show();
@@ -280,6 +284,7 @@ public class ImageSearchWebActivity extends Activity {
     @Override
     protected void onDestroy() {
         executor.shutdownNow();
+        mainHandler.removeCallbacksAndMessages(null);
         if (webView != null) {
             webView.stopLoading();
             webView.destroy();

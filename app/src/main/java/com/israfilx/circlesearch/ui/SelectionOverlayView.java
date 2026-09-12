@@ -7,6 +7,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PathMeasure;
@@ -14,6 +15,7 @@ import android.graphics.PorterDuff;
 import android.graphics.PorterDuffXfermode;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.SweepGradient;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.animation.DecelerateInterpolator;
@@ -84,7 +86,18 @@ public class SelectionOverlayView extends View {
     private static final int HANDLE_TR = 1;
     private static final int HANDLE_BR = 2;
     private static final int HANDLE_BL = 3;
-    // Stroke putih: intensitas penuh, mengalir + berdenyut
+
+    // Palet resmi 4 warna Google (dipakai bergantian di seluruh brand:
+    // logo, Circle to Search, loading spinner), diputar sebagai sweep
+    // gradient berjalan di sekeliling bingkai — ala CTS asli.
+    private static final int GOOGLE_BLUE = Color.parseColor("#4285F4");
+    private static final int GOOGLE_RED = Color.parseColor("#EA4335");
+    private static final int GOOGLE_YELLOW = Color.parseColor("#FBBC05");
+    private static final int GOOGLE_GREEN = Color.parseColor("#34A853");
+    private final int[] googleSweepColors = {
+            GOOGLE_BLUE, GOOGLE_RED, GOOGLE_YELLOW, GOOGLE_GREEN, GOOGLE_BLUE
+    };
+    private final Matrix sweepMatrix = new Matrix();
 
     private static final float MIN_DRAG_DISTANCE_PX = 24f;
     private static final float MIN_RECT_SIZE_DP = 40f;
@@ -119,18 +132,20 @@ public class SelectionOverlayView extends View {
         frameFillPaint.setStyle(Paint.Style.FILL);
         frameFillPaint.setColor(Color.argb(20, 255, 255, 255));
 
-        // Sudut handle: stroke putih tebal, ujung membulat (ala CTS)
+        // Sudut handle: bracket putih solid, tebal, ujung membulat (ala CTS asli)
         handlePaint.setStyle(Paint.Style.STROKE);
-        handlePaint.setStrokeWidth(dp(4.2f));
+        handlePaint.setStrokeWidth(dp(5.5f));
         handlePaint.setStrokeCap(Paint.Cap.ROUND);
         handlePaint.setStrokeJoin(Paint.Join.ROUND);
         handlePaint.setColor(Color.WHITE);
 
+        // Bayangan tipis di belakang bracket agar tetap terbaca di atas
+        // latar terang, tanpa membuat efek glow warna-warni.
         handleStrokePaint.setStyle(Paint.Style.STROKE);
-        handleStrokePaint.setStrokeWidth(dp(7f));
+        handleStrokePaint.setStrokeWidth(dp(8.5f));
         handleStrokePaint.setStrokeCap(Paint.Cap.ROUND);
         handleStrokePaint.setStrokeJoin(Paint.Join.ROUND);
-        handleStrokePaint.setColor(Color.argb(70, 255, 255, 255));
+        handleStrokePaint.setColor(Color.argb(90, 0, 0, 0));
 
         setWillNotDraw(false);
         startRgbFlow();
@@ -149,11 +164,6 @@ public class SelectionOverlayView extends View {
             return new RectF(selectionRect);
         }
         return new RectF(pathBounds);
-    }
-
-    /** Path lasso asli (boleh kosong setelah masuk mode ADJUST). */
-    public Path getLassoPath() {
-        return lassoPath;
     }
 
     private float dp(float value) {
@@ -186,50 +196,54 @@ public class SelectionOverlayView extends View {
     }
 
     /**
-     * Alpha putih sepanjang path: gelombang terang mengalir (peak ~255),
-     * area lain tetap putih lembut. Dikombinasikan dengan denyut global.
+     * Sweep gradient 4 warna Google (biru-merah-kuning-hijau) berpusat di
+     * tengah rect/path, berputar terus mengikuti flowPhase — inilah border
+     * "pelangi Google" khas CTS/Circle to Search, bukan cincin putih polos.
+     * Denyut global sedikit menaikkan opacity keseluruhan.
      */
-    private int whiteAt(float t, float pulse) {
-        t = t - (float) Math.floor(t);
-        // Dua puncak terang per siklus agar aliran terasa terus-menerus
-        float wave = (float) Math.sin(t * Math.PI * 2.0);
-        wave = wave * wave; // 0..1, puncak lebih tajam
-        float base = 0.45f + 0.55f * wave; // 0.45..1.0
-        float pulseAmp = 0.72f + 0.28f * pulse; // denyut 72%..100%
-        int alpha = Math.max(1, Math.min(255, (int) (255f * base * pulseAmp)));
-        return (alpha << 24) | 0x00FFFFFF;
+    private SweepGradient buildGoogleSweep(float cx, float cy, float pulse) {
+        SweepGradient sweep = new SweepGradient(cx, cy, googleSweepColors, null);
+        sweepMatrix.reset();
+        sweepMatrix.postRotate(flowPhase * 360f, cx, cy);
+        sweep.setLocalMatrix(sweepMatrix);
+        return sweep;
     }
 
     private void drawRgbPath(Canvas canvas, Path path) {
         pathMeasure.setPath(path, false);
         float length = pathMeasure.getLength();
         if (length < 1f) return;
-        float segmentLen = dp(SEGMENT_DP);
-        float cycleLen = dp(160f);
+
+        RectF bounds = new RectF();
+        path.computeBounds(bounds, true);
+        float cx = bounds.centerX();
+        float cy = bounds.centerY();
         float pulse = pulsePhase;
+
         // Stroke width ikut denyut sedikit
         float pulseW = 1f + 0.18f * pulse;
-        segmentPaint.setStrokeWidth(dp(3.2f) * pulseW);
-        glowPaint.setStrokeWidth(dp(10f) * pulseW);
+        float coreWidth = dp(3.6f) * pulseW;
+        float glowWidth = dp(10f) * pulseW;
+        int baseAlpha = Math.max(1, Math.min(255, (int) (255f * (0.82f + 0.18f * pulse))));
 
-        for (float d = 0f; d < length; d += segmentLen) {
-            float end = Math.min(d + segmentLen + 1f, length);
-            segmentPath.reset();
-            if (!pathMeasure.getSegment(d, end, segmentPath, true)) continue;
-            float t = ((d / cycleLen) + flowPhase) % 1f;
-            if (t < 0f) t += 1f;
-            int color = whiteAt(t, pulse);
-            int a = (color >>> 24) & 0xFF;
-            // Glow lebih transparan dari core stroke
-            int glowA = Math.max(1, (int) (a * 0.28f));
-            glowPaint.setColor((glowA << 24) | 0x00FFFFFF);
-            canvas.drawPath(segmentPath, glowPaint);
-            segmentPaint.setColor(color);
-            canvas.drawPath(segmentPath, segmentPaint);
-        }
+        SweepGradient sweep = buildGoogleSweep(cx, cy, pulse);
+
+        glowPaint.setShader(sweep);
+        glowPaint.setStrokeWidth(glowWidth);
+        glowPaint.setAlpha((int) (baseAlpha * 0.35f));
+        canvas.drawPath(path, glowPaint);
+
+        segmentPaint.setShader(sweep);
+        segmentPaint.setStrokeWidth(coreWidth);
+        segmentPaint.setAlpha(baseAlpha);
+        canvas.drawPath(path, segmentPaint);
+
+        // Bersihkan shader agar paint ini tidak "bocor" dipakai di draw lain
+        glowPaint.setShader(null);
+        segmentPaint.setShader(null);
     }
 
-    /** Stroke putih mengalir di sekeliling rect (mode ADJUST). */
+    /** Border gradasi 4-warna Google berputar di sekeliling rect (mode ADJUST). */
     private void drawRgbRect(Canvas canvas, RectF r) {
         Path rectPath = new Path();
         float radius = dp(14);
@@ -242,8 +256,8 @@ public class SelectionOverlayView extends View {
      * di tiap corner (bukan 8 titik lingkaran).
      */
     private void drawHandles(Canvas canvas, RectF r) {
-        float len = dp(18);   // panjang lengan sudut
-        float rad = dp(12);   // radius lengkung sudut (selaras bingkai)
+        float len = dp(22);   // panjang lengan sudut (lebih tegas, ala CTS)
+        float rad = dp(14);   // radius lengkung sudut (selaras bingkai)
         Path corner = new Path();
 
         // TL

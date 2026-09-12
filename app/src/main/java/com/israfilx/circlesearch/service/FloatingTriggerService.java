@@ -95,7 +95,11 @@ public class FloatingTriggerService extends Service {
     private ValueAnimator spinAnim;
     /** Animasi hide/show pil: memendek→hilang saat hide, memanjang dari pendek saat show. */
     private ValueAnimator visibilityAnim;
-    /** true selagi animasi hide berjalan, untuk mencegah addView baru menimpa sebelum removeView selesai. */
+    /**
+     * true selagi animasi hide berjalan. showPill() memeriksa flag ini dan
+     * memaksa window lama lepas seketika (hidePillImmediate()) sebelum
+     * membuat window baru — mencegah dua window pil tumpang tindih.
+     */
     private boolean hidingInProgress = false;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -105,7 +109,6 @@ public class FloatingTriggerService extends Service {
             animateCollapse();
         }
     };
-    private ValueAnimator colorAnim; // tidak lagi dipakai untuk crossfade; disisakan agar stopColorCycle aman
 
     /**
      * 1 detik sebelum ganti warna: pil memendek hingga hilang
@@ -240,6 +243,17 @@ public class FloatingTriggerService extends Service {
             return;
         }
 
+        // Jika masih ada animasi hide yang berjalan (window lama belum
+        // sempat di-removeView di akhir animasinya), lepas window lama
+        // itu SEKARANG secara seketika sebelum membuat window baru.
+        // Tanpa ini, field pillView langsung ditimpa oleh instance baru
+        // di bawah sementara window fisik lama tetap menempel di
+        // WindowManager sampai animasi hide-nya selesai — dua window
+        // pil hidup berdampingan sesaat (tumpang tindih secara visual).
+        if (hidingInProgress) {
+            hidePillImmediate();
+        }
+
         cancelVisibilityAnim();
         hidingInProgress = false;
         expanded = false;
@@ -358,7 +372,11 @@ public class FloatingTriggerService extends Service {
         animating = false;
     }
 
-    /** Hentikan pil seketika tanpa animasi — dipakai saat service benar-benar dihentikan (onDestroy). */
+    /**
+     * Hentikan pil seketika tanpa animasi — dipakai saat service benar-benar
+     * dihentikan (onDestroy), triggerCapture(), maupun showPill() yang perlu
+     * memaksa window lama lepas lebih dulu sebelum window baru dibuat.
+     */
     private void hidePillImmediate() {
         cancelAutoCollapse();
         stopColorCycle();
@@ -405,10 +423,6 @@ public class FloatingTriggerService extends Service {
     private void stopColorCycle() {
         mainHandler.removeCallbacks(colorCycleRunnable);
         mainHandler.removeCallbacks(colorPreHideRunnable);
-        if (colorAnim != null) {
-            colorAnim.cancel();
-            colorAnim = null;
-        }
     }
 
     /**

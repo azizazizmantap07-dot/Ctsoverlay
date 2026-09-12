@@ -594,13 +594,11 @@ public class OverlayCaptureService extends Service {
     // ---- Translate ----
 
     private void runOcrAndTranslate() {
-        // Untuk OCR, pakai crop persegi (cropToRect) bukan crop mengikuti
-        // bentuk lasso (cropToPath) — teks yang terpotong bentuk lasso bisa
-        // mengurangi akurasi baca ML Kit, sedangkan area persegi penuh
-        // memberi konteks visual lebih utuh untuk baris teks yang terpotong
-        // tipis oleh coretan. Untuk overlay hasil, kita tetap perlu offset
-        // area crop terhadap fullScreenshot supaya boundingBox tiap blok
-        // bisa dipetakan balik ke koordinat layar penuh.
+        // Crop persegi (bukan mengikuti bentuk lasso) memberi konteks
+        // visual lebih utuh untuk baris teks di tepi area seleksi,
+        // sehingga akurasi baca ML Kit lebih baik. Untuk overlay hasil,
+        // kita tetap perlu offset area crop terhadap fullScreenshot supaya
+        // boundingBox tiap blok bisa dipetakan balik ke koordinat layar penuh.
         final Rect cropOffset;
         final Bitmap ocrBitmap;
 

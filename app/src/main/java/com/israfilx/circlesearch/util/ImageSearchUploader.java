@@ -126,20 +126,12 @@ public final class ImageSearchUploader {
     // URL builders
     // ------------------------------------------------------------------
 
-    public static String getYandexUrl(String imageUrl) {
-        return "https://yandex.com/images/search?rpt=imageview&url=" + enc(imageUrl);
-    }
-
     public static String getBingUrl(String imageUrl) {
         return "https://www.bing.com/images/search?view=detailv2&iss=sbi&q=imgurl:" + enc(imageUrl);
     }
 
     public static String getGoogleLensUrl(String imageUrl) {
         return "https://lens.google.com/uploadbyurl?url=" + enc(imageUrl);
-    }
-
-    public static String getTineyeUrl(String imageUrl) {
-        return "https://tineye.com/search?url=" + enc(imageUrl);
     }
 
     private static String enc(String s) {
