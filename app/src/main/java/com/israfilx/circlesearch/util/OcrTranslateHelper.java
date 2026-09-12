@@ -211,6 +211,15 @@ public final class OcrTranslateHelper {
      */
     private static final int MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE = 3;
     /**
+     * PERBAIKAN — ambang lebih ketat, dipakai {@link #detectScriptLanguage}
+     * hanya ketika sumber teks berasal dari SATU blok OCR saja. Kasus blok
+     * tunggal (mis. hasil crop kecil, atau 1 elemen UI yang lolos filter)
+     * tidak punya blok lain sebagai "sanity check" — 3 karakter noise pada
+     * blok tunggal jauh lebih mungkin murni salah-OCR dibanding 3 karakter
+     * yang muncul di antara banyak blok konten lain yang valid.
+     */
+    private static final int MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE_SINGLE_BLOCK = 6;
+    /**
      * Ambang confidence untuk {@link LanguageIdentifier}, DITURUNKAN dari
      * default 0.5 menjadi 0.35. Screenshot "1 layar" hampir selalu berisi
      * campuran teks aplikasi + elemen UI sistem (jam, status bar, watermark
@@ -415,6 +424,18 @@ public final class OcrTranslateHelper {
                     || "Korean".equals(bestScript)) {
                 useMlKitOnly = true;
             } else if ("Latin".equals(bestScript) && mlKitBlocksMostlyLatin(bestBlocks)) {
+                // PERBAIKAN — jangan probe Tesseract sama sekali kalau ML Kit
+                // Latin sudah jelas-jelas huruf Latin asli (bukan noise),
+                // BERAPAPUN skornya. Sebelumnya syarat ini hanya menang atas
+                // Tesseract secara skor di tryTesseractFallback, tapi
+                // Tesseract tetap DIPANGGIL lebih dulu untuk kasus skor
+                // Latin rendah (mis. blok pendek "Hello" / "OK Google").
+                // Tesseract lalu ber-"halusinasi" teks Arab/Thai dari bitmap
+                // yang di-scale-up agresif, dan pada beberapa kasus histori
+                // log menang lawan ML Kit karena skor panjang teksnya
+                // kebetulan lebih besar. Kalau ML Kit sudah pasti Latin
+                // valid, Tesseract (yang hanya mengerti ara/tha) tidak
+                // mungkin memberi jawaban yang lebih benar — jadi lewati.
                 useMlKitOnly = true;
             } else if ("Devanagari".equals(bestScript) && bestScore >= 40) {
                 useMlKitOnly = true;
@@ -470,7 +491,23 @@ public final class OcrTranslateHelper {
                 // DAN ML Kit tidak punya hasil Latin/CJK yang valid.
                 boolean preferTess = false;
                 int arabThaiChars = countArabicThaiChars(tessBlocks);
-                boolean realArabThai = arabThaiChars >= 5; // minimal 5 huruf skrip
+                // PERBAIKAN — naikkan syarat minimal huruf skrip Arab/Thai dari
+                // 5 menjadi 8 KHUSUS bila hasil Tesseract cuma 1 blok. Blok
+                // tunggal pendek adalah kasus paling rawan halusinasi Tesseract
+                // (lihat log: "สวัสดิีตอนเย็น" / "คุณสบายดีไหม" muncul dari
+                // screenshot yang kemungkinan bukan Thai sama sekali — kata
+                // Thai umum yang "kebetulan" match pola visual noise setelah
+                // bitmap di-scale-up 1.5x-3.5x). Kalimat Thai/Arab asli hampir
+                // selalu menghasilkan >1 baris atau kata yang lebih panjang;
+                // ambang lebih ketat untuk kasus blok=1 tidak mengorbankan
+                // teks singkat asli (mis. sapaan) karena tetap dicek dominasi
+                // skrip lewat scoreTranslatedBlocksForLang di langkah berikutnya.
+                int minArabThaiChars = (tessBlocks != null && tessBlocks.size() <= 1) ? 8 : 5;
+                // PERBAIKAN — selain jumlah total karakter skrip, syaratkan
+                // juga ada rangkaian berurutan minimal 3 karakter (kata nyata),
+                // bukan sekadar karakter skrip yang tersebar di antara noise.
+                boolean hasRealWord = hasArabicOrThaiRun(tessBlocks, 3);
+                boolean realArabThai = arabThaiChars >= minArabThaiChars && hasRealWord;
 
                 if (tessBlocks != null && !tessBlocks.isEmpty() && realArabThai) {
                     if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0
@@ -491,6 +528,8 @@ public final class OcrTranslateHelper {
 
                 Log.d(TAG, "preferTess=" + preferTess
                         + " arabThaiChars=" + arabThaiChars
+                        + " minRequired=" + minArabThaiChars
+                        + " hasRealWord=" + hasRealWord
                         + " mlKit=" + mlKitScript + "/" + mlKitScore);
 
                 if (preferTess) {
@@ -544,6 +583,45 @@ public final class OcrTranslateHelper {
 
     private static boolean containsArabicOrThai(List<TranslatedBlock> blocks) {
         return countArabicThaiChars(blocks) >= 3;
+    }
+
+    /**
+     * PERBAIKAN — validasi tambahan: apakah ada setidaknya satu rangkaian
+     * karakter Arab/Thai BERURUTAN (boleh diselingi spasi) sepanjang minimal
+     * {@code minRunLength}, alih-alih hanya menghitung total karakter skrip
+     * yang tersebar di seluruh blok.
+     *
+     * Ini penting karena {@link #countArabicThaiChars} bisa lolos ambang
+     * hanya dari beberapa karakter skrip yang terselip di antara banyak
+     * noise/simbol acak (khas hasil Tesseract dari gambar yang sebenarnya
+     * bukan Arab/Thai). Kalimat/kata Arab atau Thai ASLI hampir selalu
+     * membentuk rangkaian huruf berurutan yang cukup panjang (kata nyata
+     * jarang di bawah 3 huruf berturut-turut untuk Thai/Arab), sedangkan
+     * halusinasi OCR pada noise cenderung menghasilkan karakter skrip yang
+     * terputus-putus oleh simbol/tanda baca aneh.
+     */
+    private static boolean hasArabicOrThaiRun(List<TranslatedBlock> blocks, int minRunLength) {
+        if (blocks == null) return false;
+        for (TranslatedBlock b : blocks) {
+            if (b == null || b.originalText == null) continue;
+            String t = b.originalText;
+            int run = 0;
+            for (int i = 0; i < t.length(); i++) {
+                char c = t.charAt(i);
+                boolean isScriptChar = (c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
+                        || (c >= 0x08A0 && c <= 0x08FF) || (c >= 0xFB50 && c <= 0xFDFF)
+                        || (c >= 0xFE70 && c <= 0xFEFF) || (c >= 0x0E00 && c <= 0x0E7F);
+                if (isScriptChar) {
+                    run++;
+                    if (run >= minRunLength) return true;
+                } else if (!Character.isWhitespace(c)) {
+                    // simbol/noise/karakter lain memutus rangkaian
+                    run = 0;
+                }
+                // spasi tidak memutus rangkaian (kata bisa dipisah OCR jadi 2 token)
+            }
+        }
+        return false;
     }
 
     /** True jika hasil ML Kit Latin didominasi huruf A–Z (bukan noise). */
@@ -1096,7 +1174,7 @@ public final class OcrTranslateHelper {
 
         // Paksa bahasa berdasarkan aksara Unicode — lebih andal daripada
         // language-id ML Kit yang sering gagal pada teks Arab/Thai pendek.
-        String forced = detectScriptLanguage(combined);
+        String forced = detectScriptLanguage(combined, blocks.size());
         if (forced != null) {
             Log.d(TAG, "Bahasa dipaksa dari aksara: " + forced);
             if (TARGET_LANGUAGE.equals(forced)) {
@@ -1162,6 +1240,17 @@ public final class OcrTranslateHelper {
      * Lebih andal daripada LanguageIdentifier untuk skrip non-Latin.
      */
     private static String detectScriptLanguage(String text) {
+        return detectScriptLanguage(text, Integer.MAX_VALUE);
+    }
+
+    /**
+     * @param blockCount jumlah blok OCR sumber yang digabung jadi {@code text}.
+     *        Bila hanya 1 (atau tidak diketahui → panggil overload tanpa
+     *        parameter ini, yang memakai Integer.MAX_VALUE / selalu longgar),
+     *        ambang jumlah karakter aksara yang dibutuhkan untuk memaksa
+     *        bahasa dinaikkan (lihat requiredScriptChars di bawah).
+     */
+    private static String detectScriptLanguage(String text, int blockCount) {
         if (text == null || text.isEmpty()) return null;
         int thai = 0, arab = 0, hangul = 0, kana = 0, cjk = 0, deva = 0;
         int cyril = 0, greek = 0, hebrew = 0, beng = 0, tamil = 0, telugu = 0;
@@ -1207,19 +1296,31 @@ public final class OcrTranslateHelper {
         if (kannada > best) { best = kannada; lang = TranslateLanguage.KANNADA; }
         if (georgian > best) { best = georgian; lang = TranslateLanguage.GEORGIAN; }
 
+        // PERBAIKAN — ambang jumlah karakter aksara yang dibutuhkan untuk
+        // memaksa bahasa dinaikkan KHUSUS bila sumbernya cuma 1 blok OCR.
+        // Blok tunggal (biasanya hasil crop kecil / 1 elemen UI) jauh lebih
+        // rawan salah-klasifikasi Unicode dibanding gabungan banyak blok
+        // (mis. mode 1-layar penuh), karena tidak ada blok lain yang bisa
+        // "menenggelamkan" 1-2 karakter noise. Lihat histori log: blok=1
+        // dengan skor OCR rendah berulang kali salah dipaksa ke bahasa yang
+        // salah walau sudah lolos ambang MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE.
+        int requiredScriptChars = (blockCount <= 1)
+                ? MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE_SINGLE_BLOCK
+                : MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE;
+
         // CJK: kana menang → Jepang; kalau hanya Hanzi → Cina
         if (kana >= 2) return TranslateLanguage.JAPANESE;
         if (cjk >= 3 && cjk >= best) return TranslateLanguage.CHINESE;
-        if (best >= MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE) return lang;
+        if (best >= requiredScriptChars) return lang;
         // PERBAIKAN BUG: sebelumnya "best >= 1" cukup untuk memaksa bahasa
         // asal jumlah huruf Latin di sekitarnya tidak lebih dari 2x lipatnya.
         // Ini membuat 1 karakter aksara non-Latin yang salah-OCR (noise UI,
         // ikon, watermark) memaksa SELURUH blok diterjemahkan ke bahasa
         // yang salah (lihat log: skor OCR serendah 4-30 dengan 1 blok tetap
-        // dipaksa "hi"). Sekarang minimal MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE
-        // karakter aksara sebelum dipaksa; di bawah itu, biarkan pipeline
-        // jatuh ke LanguageIdentifier biasa yang sudah disanitasi ketat.
-        if (cjk >= 1 && cjk >= MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE) return TranslateLanguage.CHINESE;
+        // dipaksa "hi"). Sekarang minimal requiredScriptChars karakter aksara
+        // sebelum dipaksa; di bawah itu, biarkan pipeline jatuh ke
+        // LanguageIdentifier biasa yang sudah disanitasi ketat.
+        if (cjk >= 1 && cjk >= requiredScriptChars) return TranslateLanguage.CHINESE;
         return null;
     }
 
@@ -1564,7 +1665,9 @@ public final class OcrTranslateHelper {
 
         // Paksa bahasa dari aksara Unicode / skrip OCR (CJK, Hindi, Arab, Thai).
         // LanguageIdentifier sering salah (und/ca/ig) untuk teks non-Latin.
-        String forcedLang = detectScriptLanguage(combined.toString());
+        // blockCount dari blocksForLangDetect (bukan textBlocks mentah) —
+        // itulah himpunan blok yang benar-benar dipakai membentuk 'combined'.
+        String forcedLang = detectScriptLanguage(combined.toString(), blocksForLangDetect.size());
         String fromOcr = languageFromOcrScript(ocrScript);
         // Devanagari OCR sering salah diklasifikasi Unicode sebagai Bengali.
         // Percayai skrip OCR Devanagari → Hindi, kecuali teks jelas Bengali murni.
