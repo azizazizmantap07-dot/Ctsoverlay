@@ -5,6 +5,7 @@ import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
@@ -58,6 +59,7 @@ public class SelectionOverlayView extends View {
     private final Paint lassoFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint segmentPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint outerBlurPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint framePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint frameFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -108,7 +110,9 @@ public class SelectionOverlayView extends View {
         super(context);
         this.frozenScreenshot = frozenScreenshot;
 
-        dimPaint.setColor(Color.argb(48, 0, 0, 0));
+        // Dim gelap ala CTS: area di luar bingkai jelas meredup, bukan sekadar
+        // sedikit tergelapkan, supaya perhatian jatuh ke objek yang diseleksi.
+        dimPaint.setColor(Color.argb(150, 0, 0, 0));
 
         lassoFillPaint.setStyle(Paint.Style.FILL);
         lassoFillPaint.setColor(Color.argb(50, 255, 255, 255));
@@ -122,6 +126,14 @@ public class SelectionOverlayView extends View {
         glowPaint.setStrokeWidth(dp(11f));
         glowPaint.setStrokeJoin(Paint.Join.ROUND);
         glowPaint.setStrokeCap(Paint.Cap.ROUND);
+
+        // Lapisan blur terluar: sebar cahaya warna-warni ke kanvas di luar
+        // garis border, bukan cuma stroke transparan lebar. setLayerType
+        // SOFTWARE wajib di view yang memakai BlurMaskFilter agar tampil.
+        outerBlurPaint.setStyle(Paint.Style.STROKE);
+        outerBlurPaint.setStrokeJoin(Paint.Join.ROUND);
+        outerBlurPaint.setStrokeCap(Paint.Cap.ROUND);
+        outerBlurPaint.setMaskFilter(new BlurMaskFilter(dp(16f), BlurMaskFilter.Blur.NORMAL));
 
         framePaint.setStyle(Paint.Style.STROKE);
         framePaint.setStrokeWidth(dp(2.8f));
@@ -148,6 +160,10 @@ public class SelectionOverlayView extends View {
         handleStrokePaint.setColor(Color.argb(90, 0, 0, 0));
 
         setWillNotDraw(false);
+        // BlurMaskFilter (dipakai outerBlurPaint) tidak dirender oleh hardware
+        // acceleration di Android — wajib software layer agar glow benar-benar
+        // tampil, bukan hilang diam-diam.
+        setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         startRgbFlow();
 
         setAlpha(0f);
@@ -227,18 +243,29 @@ public class SelectionOverlayView extends View {
         int baseAlpha = Math.max(1, Math.min(255, (int) (255f * (0.82f + 0.18f * pulse))));
 
         SweepGradient sweep = buildGoogleSweep(cx, cy, pulse);
+        float blurWidth = dp(22f) * pulseW;
 
+        // 1) Blur terluar: cahaya menyebar lembut ke kedua sisi garis,
+        //    inilah kesan "menyala" ala CTS yang tidak didapat dari stroke biasa.
+        outerBlurPaint.setShader(sweep);
+        outerBlurPaint.setStrokeWidth(blurWidth);
+        outerBlurPaint.setAlpha((int) (baseAlpha * 0.6f));
+        canvas.drawPath(path, outerBlurPaint);
+
+        // 2) Glow tengah: lebih pekat, transisi antara blur dan garis inti.
         glowPaint.setShader(sweep);
         glowPaint.setStrokeWidth(glowWidth);
-        glowPaint.setAlpha((int) (baseAlpha * 0.35f));
+        glowPaint.setAlpha((int) (baseAlpha * 0.55f));
         canvas.drawPath(path, glowPaint);
 
+        // 3) Garis inti: tegas dan tipis, warna paling jenuh.
         segmentPaint.setShader(sweep);
         segmentPaint.setStrokeWidth(coreWidth);
         segmentPaint.setAlpha(baseAlpha);
         canvas.drawPath(path, segmentPaint);
 
         // Bersihkan shader agar paint ini tidak "bocor" dipakai di draw lain
+        outerBlurPaint.setShader(null);
         glowPaint.setShader(null);
         segmentPaint.setShader(null);
     }
