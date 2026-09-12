@@ -1,86 +1,29 @@
 # Circle Search Overlay
 
-Aplikasi overlay Android yang meniru cara kerja **Circle to Search** dari
-Google: lingkari atau seleksi bebas apa pun yang tampil di layar — lalu
-langsung **terjemahkan teksnya**, **salin hasil OCR**, atau **cari gambarnya**
-di mesin pencari — tanpa perlu keluar dari aplikasi yang sedang dibuka.
+Aplikasi overlay Android yang meniru cara kerja Circle to Search Google —
+seleksi bebas di layar untuk translate, OCR teks, dan visual search. Trigger
+memakai mekanisme **Default Assistant App**, dipanggil lewat gesture
+assist bawaan ROM (swipe sudut bawah / long-press tombol power), atau lewat
+**Floating Trigger Button**.
 
-Tidak butuh root, dan OCR + terjemahan berjalan **sepenuhnya on-device**
-lewat Google ML Kit — teks di layar kamu tidak dikirim ke server mana pun
-saat proses OCR/translate berlangsung.
+**Mode trigger (tanpa root):**
+- **Asisten Digital** — capture layar silent lewat Assist API (screenshot
+  sistem, tanpa dialog).
+- **Floating Button** — tombol mengambang di tepi layar; capture lewat
+  AccessibilityService.takeScreenshot.
 
-## Cara kerja
+**Tidak terikat Google.** OCR dan translate berjalan sepenuhnya on-device
+lewat ML Kit (tidak ada data yang dikirim ke server manapun saat OCR/
+translate berlangsung).
 
-### 1. Memicu overlay
-Ada dua cara memanggil overlay ini, keduanya tanpa root:
+**Visual search ("Cari")** selalu di dalam aplikasi (WebView). Gambar
+di-upload ke host sementara (Litterbox 1 jam / Catbox), lalu WebView
+membuka URL hasil reverse search (Yandex / Bing / Google Lens / TinEye)
+— pola sama seperti AKS-Labs/CircleToSearch. Hasil muncul otomatis,
+tanpa file chooser atau Intent ke app eksternal.
 
-- **Sebagai Asisten Digital (default)** — aplikasi didaftarkan sebagai
-  `VoiceInteractionService`, sehingga muncul di daftar **Settings → Apps →
-  Default apps → Digital assistant app**. Setelah diset sebagai default,
-  overlay bisa dipanggil lewat gesture assist bawaan ROM (biasanya swipe
-  dari sudut bawah layar, atau long-press tombol power, tergantung
-  perangkat). Screenshot layar diambil secara *silent* lewat Assist API
-  bawaan sistem — tanpa dialog konfirmasi.
-- **Floating Trigger Button** — sebuah "pil" kecil yang mengambang di tepi
-  layar (lewat `AccessibilityService`), bisa ditekan kapan saja untuk
-  memicu capture layar tanpa harus setting default assistant sama sekali.
-
-### 2. Menyeleksi area
-Setelah layar ter-capture, muncul layer seleksi transparan di atasnya. Kamu
-bisa melingkari (lasso) area tertentu secara bebas, atau langsung memilih
-aksi untuk seluruh layar tanpa menyeleksi apa pun dulu.
-
-### 3. Memilih aksi
-Menu berisi empat ikon muncul di bagian bawah layar:
-
-| Ikon | Aksi |
-|---|---|
-| 🔍 Cari | Visual/reverse image search atas area yang dipilih |
-| 🌐 Translate | OCR teks pada area, lalu terjemahkan otomatis |
-| 📋 Salin | OCR teks pada area, salin ke clipboard (tanpa terjemahan) |
-| ✕ Tutup | Menutup overlay sepenuhnya |
-
-**Translate & OCR** — Teks dideteksi dengan ML Kit Text Recognition, bahasa
-sumbernya dikenali otomatis lewat ML Kit Language Identification dari
-sekitar 20 bahasa yang didukung (Inggris, Mandarin, Jepang, Korea, Arab,
-dll — lihat daftar lengkap di kode `OcrTranslateHelper`), lalu diterjemahkan
-ke **Bahasa Indonesia** memakai ML Kit Translate. Hasil terjemahan
-ditampilkan menimpa posisi teks aslinya di layar. Model bahasa diunduh
-sekali per pasangan bahasa (butuh internet saat unduhan pertama); setelah
-itu translate berjalan offline.
-
-**Cari (visual search)** — gambar hasil crop area yang dipilih di-upload ke
-hosting gambar sementara (Litterbox, kedaluwarsa 1 jam, dengan fallback ke
-Catbox), lalu URL publiknya dipakai untuk membuka pencarian gambar di
-**Google Lens** atau **Bing Visual Search** lewat WebView di dalam aplikasi
-sendiri — tidak membuka browser eksternal maupun app lain.
-
-## Struktur teknis singkat
-
-- **Bahasa & platform:** Java, Android (`minSdk` 26 / Android 8.0, `targetSdk`
-  34 / Android 14), dibangun dengan Gradle 8.7 + Android Gradle Plugin 8.5.0.
-- **Komponen utama:**
-  - `MyVoiceInteractionService` + `AssistTriggerActivity` — pintu masuk
-    sebagai default Digital Assistant.
-  - `OverlayCaptureService` — foreground service yang mengelola capture
-    layar dan seluruh siklus overlay seleksi.
-  - `FloatingTriggerService` — mengelola tombol pil mengambang sebagai
-    trigger alternatif.
-  - `ScreenshotAccessibilityService` — dipakai Floating Button untuk
-    mengambil screenshot lewat Accessibility API.
-  - `SelectionOverlayView` / `TranslationOverlayView` / `BottomIconMenu` —
-    UI overlay untuk seleksi area, tampilan hasil translate, dan menu aksi.
-  - `OcrTranslateHelper` — pembungkus ML Kit untuk OCR, deteksi bahasa, dan
-    terjemahan.
-  - `ImageSearchUploader` + `ImageSearchWebActivity` — upload gambar dan
-    tampilan hasil pencarian visual dalam WebView.
-- **Library pihak ketiga:** Google ML Kit (`text-recognition`,
-  `language-id`, `translate`) — semua berjalan on-device.
-- **Izin yang diminta:** overlay layar (`SYSTEM_ALERT_WINDOW`),
-  accessibility (untuk Floating Button), voice interaction (untuk mode
-  Asisten Digital), foreground service, serta internet (khusus untuk
-  mengunduh model bahasa ML Kit dan meng-upload gambar saat fitur "Cari"
-  dipakai).
+Default assistant di-set manual lewat Settings → Default apps / Aplikasi
+asisten digital.
 
 ## Build via GitHub Actions
 
@@ -129,16 +72,3 @@ sendiri (misal upload ke tempat lain).
 ```
 
 Output ada di `app/build/outputs/apk/debug/`.
-
-## Privasi
-
-- OCR dan terjemahan teks berjalan sepenuhnya di perangkat (ML Kit
-  on-device) — tidak ada teks layar yang dikirim ke server mana pun untuk
-  fitur ini.
-- Fitur **Cari** adalah pengecualian yang disengaja: karena visual/reverse
-  image search butuh URL gambar publik, potongan gambar hasil seleksi
-  di-upload ke host sementara (Litterbox/Catbox, kedaluwarsa dalam
-  hitungan jam) agar bisa dipakai oleh Google Lens / Bing. Fitur ini hanya
-  aktif saat kamu menekan ikon "Cari" secara eksplisit.
-- Aplikasi tidak terhubung ke akun Google mana pun dan tidak memerlukan
-  login.

@@ -21,6 +21,10 @@ import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions;
+import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions;
+import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions;
+import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.util.ArrayList;
@@ -68,6 +72,33 @@ import java.util.concurrent.atomic.AtomicLong;
  * Setiap pemanggilan {@link #recognizeAndTranslate} mendapat nomor
  * "generasi" unik; hasil hanya dikirim ke callback bila generasi tsb
  * MASIH generasi terbaru saat callback siap.
+ *
+ * CATATAN PENTING — OCR multi-aksara (fix untuk Arab/Cina/dll tidak
+ * terbaca):
+ * ML Kit TextRecognizer TIDAK punya mode "universal". TextRecognizerOptions
+ * .DEFAULT_OPTIONS hanya mengenali aksara LATIN (termasuk yang berdiakritik
+ * seperti Vietnam, Spanyol, dst). Aksara Han (Cina), Jepang, Korea, dan
+ * Devanagari (Hindi) masing-masing perlu client recognizer terpisah
+ * (lihat {@link #buildAllRecognizers}) yang sekarang dijalankan paralel
+ * dan hasilnya digabung — inilah perbaikan agar Cina/Jepang/Korea/Hindi
+ * bisa diproses.
+ *
+ * ARAB, RUSIA, DAN UKRAINA TIDAK TERMASUK DAN TIDAK BISA DIPERBAIKI DENGAN
+ * CARA INI: Google ML Kit tidak menyediakan recognizer untuk aksara Arab
+ * maupun Cyrillic (dipakai Rusia & Ukraina) sama sekali (bukan karena lupa
+ * dikonfigurasi — modelnya memang tidak ada/tidak dirilis Google; hanya
+ * ada 5 recognizer resmi: Latin, Chinese, Devanagari, Japanese, Korean).
+ * Mengunduh "model bahasa" Arab/Rusia/Ukraina di menu translate app ini
+ * HANYA mengunduh model TRANSLATE teksnya (dipakai kalau teksnya sudah
+ * berupa string, mis. hasil ketik manual) — bukan model OCR/pembaca
+ * gambar. Jadi selama fitur ini memindai GAMBAR, teks Arab/Rusia/Ukraina
+ * dalam gambar tidak akan pernah terdeteksi apa pun konfigurasinya. Opsi
+ * nyata bila OCR untuk aksara-aksara ini dari gambar benar-benar
+ * dibutuhkan: (a) Google Cloud Vision API (berbayar, perlu API key &
+ * koneksi internet saat OCR, bukan on-device), atau (b) Tesseract OCR
+ * (open source, bisa on-device, tapi akurasinya jauh di bawah ML Kit/
+ * Cloud Vision dan perlu integrasi terpisah/tambahan library besar) —
+ * keduanya di luar cakupan ML Kit yang dipakai project ini sekarang.
  */
 public final class OcrTranslateHelper {
 
@@ -87,12 +118,26 @@ public final class OcrTranslateHelper {
             new LanguageInfo(TranslateLanguage.CHINESE, "Chinese (Mandarin)"),
             new LanguageInfo(TranslateLanguage.JAPANESE, "Japanese (Jepang)"),
             new LanguageInfo(TranslateLanguage.KOREAN, "Korean (Korea)"),
-            new LanguageInfo(TranslateLanguage.ARABIC, "Arabic (Arab)"),
+            // CATATAN: model ini hanya dipakai bila teks Arab masuk dalam
+            // bentuk STRING (mis. fitur lain di masa depan yang menerima
+            // teks ketikan). Untuk fitur scan GAMBAR di app ini, teks Arab
+            // TIDAK akan pernah terdeteksi oleh OCR ML Kit — lihat catatan
+            // panjang di javadoc kelas OcrTranslateHelper. Item ini sengaja
+            // TETAP ditampilkan di daftar (bukan dihapus) agar tidak
+            // menyesatkan pengguna yang mungkin memakai app lewat jalur
+            // non-gambar di masa depan.
+            new LanguageInfo(TranslateLanguage.ARABIC, "Arabic (Arab) — teks gambar tidak didukung"),
             new LanguageInfo(TranslateLanguage.SPANISH, "Spanish (Spanyol)"),
             new LanguageInfo(TranslateLanguage.FRENCH, "French (Prancis)"),
             new LanguageInfo(TranslateLanguage.GERMAN, "German (Jerman)"),
             new LanguageInfo(TranslateLanguage.PORTUGUESE, "Portuguese (Portugis)"),
-            new LanguageInfo(TranslateLanguage.RUSSIAN, "Russian (Rusia)"),
+            // CATATAN: sama seperti Arab di atas — ML Kit TIDAK punya
+            // recognizer aksara Cyrillic sama sekali (resmi dikonfirmasi
+            // di dokumentasi Google: hanya ada Latin, Chinese, Devanagari,
+            // Japanese, Korean). Teks Rusia dalam GAMBAR tidak akan pernah
+            // terbaca OCR apa pun konfigurasinya. Model translate Rusia
+            // tetap berguna kalau nanti ada jalur input teks non-gambar.
+            new LanguageInfo(TranslateLanguage.RUSSIAN, "Russian (Rusia) — teks gambar tidak didukung"),
             new LanguageInfo(TranslateLanguage.THAI, "Thai (Thailand)"),
             new LanguageInfo(TranslateLanguage.VIETNAMESE, "Vietnamese (Vietnam)"),
             new LanguageInfo(TranslateLanguage.HINDI, "Hindi"),
@@ -100,7 +145,9 @@ public final class OcrTranslateHelper {
             new LanguageInfo(TranslateLanguage.ITALIAN, "Italian (Italia)"),
             new LanguageInfo(TranslateLanguage.DUTCH, "Dutch (Belanda)"),
             new LanguageInfo(TranslateLanguage.POLISH, "Polish (Polandia)"),
-            new LanguageInfo(TranslateLanguage.UKRAINIAN, "Ukrainian (Ukraina)"),
+            // Sama seperti Rusia — Ukraina juga aksara Cyrillic, OCR gambar
+            // tidak didukung ML Kit.
+            new LanguageInfo(TranslateLanguage.UKRAINIAN, "Ukrainian (Ukraina) — teks gambar tidak didukung"),
             new LanguageInfo(TranslateLanguage.MALAY, "Malay (Melayu)"),
             new LanguageInfo(TranslateLanguage.TAGALOG, "Filipino / Tagalog")
     ));
@@ -218,35 +265,138 @@ public final class OcrTranslateHelper {
         recognizeInternal(bitmap, callback, false);
     }
 
+    /**
+     * Recognizer Latin (DEFAULT_OPTIONS) HANYA bisa membaca aksara Latin —
+     * ia buta total terhadap Han (Cina), Jepang, Korea, dan Devanagari
+     * (Hindi). ML Kit tidak punya satu recognizer "universal"; tiap sistem
+     * aksara harus dijalankan lewat client-nya sendiri.
+     *
+     * Untuk menangani screenshot/gambar yang isinya bisa aksara apa saja,
+     * kelima recognizer berikut dijalankan PARALEL pada gambar yang sama,
+     * lalu semua blok teksnya digabung (lihat {@link #recognizeInternal}).
+     * Ini sedikit lebih lambat/berat daripada satu recognizer saja, tapi
+     * satu-satunya cara ML Kit bisa mengenali gambar campuran/tak diketahui
+     * aksaranya lebih dulu.
+     *
+     * CATATAN: tidak ada entry untuk Arab/Rusia/Ukraina di sini dengan
+     * sengaja — ML Kit Google tidak menyediakan recognizer aksara Arab
+     * maupun Cyrillic sama sekali (baik di versi legacy maupun versi
+     * terbaru). Screenshot berisi teks aksara tsb akan selalu gagal
+     * di-OCR oleh kode ini apa pun konfigurasinya; ini keterbatasan
+     * pustaka, bukan bug yang bisa diperbaiki lewat kode app.
+     */
+    private static List<TextRecognizer> buildAllRecognizers() {
+        List<TextRecognizer> list = new ArrayList<>();
+        list.add(TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS));
+        list.add(TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build()));
+        list.add(TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build()));
+        list.add(TextRecognition.getClient(new KoreanTextRecognizerOptions.Builder().build()));
+        list.add(TextRecognition.getClient(new DevanagariTextRecognizerOptions.Builder().build()));
+        return list;
+    }
+
     private static void recognizeInternal(Bitmap bitmap, ResultCallback callback, boolean alsoTranslate) {
         final long myGeneration = requestGeneration.incrementAndGet();
 
-        TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        List<TextRecognizer> recognizers = buildAllRecognizers();
         InputImage image = InputImage.fromBitmap(bitmap, 0);
 
-        recognizer.process(image)
-                .addOnSuccessListener(visionText -> {
-                    if (!isCurrent(myGeneration)) return;
+        List<Text.TextBlock> mergedBlocks = Collections.synchronizedList(new ArrayList<>());
+        AtomicInteger remaining = new AtomicInteger(recognizers.size());
+        AtomicInteger failures = new AtomicInteger(0);
 
-                    List<Text.TextBlock> textBlocks = visionText.getTextBlocks();
-                    if (textBlocks.isEmpty()) {
-                        callback.onNoTextFound();
-                        return;
-                    }
-                    Log.d(TAG, "OCR berhasil, jumlah blok=" + textBlocks.size());
+        for (TextRecognizer recognizer : recognizers) {
+            recognizer.process(image)
+                    .addOnSuccessListener(visionText -> {
+                        mergedBlocks.addAll(visionText.getTextBlocks());
+                        if (remaining.decrementAndGet() == 0) {
+                            onAllRecognizersDone(mergedBlocks, failures.get(), recognizers.size(),
+                                    callback, alsoTranslate, myGeneration);
+                        }
+                    })
+                    .addOnFailureListener(e -> {
+                        Log.e(TAG, "Salah satu recognizer OCR gagal (lanjut pakai recognizer lain)", e);
+                        failures.incrementAndGet();
+                        if (remaining.decrementAndGet() == 0) {
+                            onAllRecognizersDone(mergedBlocks, failures.get(), recognizers.size(),
+                                    callback, alsoTranslate, myGeneration);
+                        }
+                    });
+        }
+    }
 
-                    if (!alsoTranslate) {
-                        callback.onSuccess(toUntranslatedBlocks(textBlocks));
-                        return;
-                    }
+    private static void onAllRecognizersDone(
+            List<Text.TextBlock> mergedBlocks, int failureCount, int totalRecognizers,
+            ResultCallback callback, boolean alsoTranslate, long myGeneration) {
+        if (!isCurrent(myGeneration)) return;
 
-                    detectLanguageAndTranslateBlocks(textBlocks, callback, myGeneration);
-                })
-                .addOnFailureListener(e -> {
-                    if (!isCurrent(myGeneration)) return;
-                    Log.e(TAG, "OCR gagal", e);
-                    callback.onError(e);
-                });
+        if (mergedBlocks.isEmpty()) {
+            if (failureCount == totalRecognizers) {
+                callback.onError(new Exception("Semua recognizer OCR gagal"));
+            } else {
+                callback.onNoTextFound();
+            }
+            return;
+        }
+
+        List<Text.TextBlock> textBlocks = dedupeOverlappingBlocks(mergedBlocks);
+        Log.d(TAG, "OCR berhasil, jumlah blok setelah gabung+dedupe=" + textBlocks.size());
+
+        if (!alsoTranslate) {
+            callback.onSuccess(toUntranslatedBlocks(textBlocks));
+            return;
+        }
+
+        detectLanguageAndTranslateBlocks(textBlocks, callback, myGeneration);
+    }
+
+    /**
+     * Beberapa recognizer yang berjalan pada gambar sama akan sering
+     * menghasilkan blok yang tumpang-tindih untuk area teks yang sama
+     * (mis. recognizer Latin dan Chinese sama-sama mendeteksi sesuatu di
+     * lokasi yang sama, salah satunya cuma "sampah" hasil salah-baca).
+     * Untuk tiap kelompok blok yang boundingBox-nya sangat tumpang tindih,
+     * pertahankan hanya SATU — yang teksnya paling panjang (heuristik
+     * sederhana: recognizer yang cocok dengan aksara sebenarnya biasanya
+     * berhasil membaca lebih banyak karakter yang valid daripada recognizer
+     * yang salah, yang sering hanya menghasilkan simbol acak atau string
+     * pendek).
+     */
+    private static List<Text.TextBlock> dedupeOverlappingBlocks(List<Text.TextBlock> blocks) {
+        List<Text.TextBlock> sorted = new ArrayList<>(blocks);
+        // Urutkan terpanjang dulu supaya saat iterasi, blok "pemenang"
+        // tiap kelompok tumpang-tindih diproses lebih dulu.
+        Collections.sort(sorted, (a, b) ->
+                Integer.compare(b.getText().trim().length(), a.getText().trim().length()));
+
+        List<Text.TextBlock> kept = new ArrayList<>();
+        for (Text.TextBlock candidate : sorted) {
+            Rect box = candidate.getBoundingBox();
+            if (box == null || candidate.getText().trim().isEmpty()) continue;
+
+            boolean overlapsKept = false;
+            for (Text.TextBlock existing : kept) {
+                Rect existingBox = existing.getBoundingBox();
+                if (existingBox != null && overlapsSignificantly(box, existingBox)) {
+                    overlapsKept = true;
+                    break;
+                }
+            }
+            if (!overlapsKept) {
+                kept.add(candidate);
+            }
+        }
+        return kept;
+    }
+
+    /** True bila area irisan >= 60% dari area kotak yang lebih kecil. */
+    private static boolean overlapsSignificantly(Rect a, Rect b) {
+        Rect intersection = new Rect(a);
+        if (!intersection.intersect(b)) return false;
+        int intersectArea = intersection.width() * intersection.height();
+        int smallerArea = Math.min(a.width() * a.height(), b.width() * b.height());
+        if (smallerArea <= 0) return false;
+        return intersectArea >= smallerArea * 0.6;
     }
 
     private static boolean isCurrent(long generation) {

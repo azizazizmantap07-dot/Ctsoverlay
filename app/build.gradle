@@ -67,6 +67,35 @@ dependencies {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
     }
+    // Recognizer TAMBAHAN untuk aksara non-Latin. text-recognition (di atas)
+    // adalah recognizer LATIN — hanya bisa baca huruf Latin (Inggris,
+    // Vietnam, Spanyol, dst). Ia BUTA TOTAL terhadap aksara Han (Cina),
+    // Jepang, Korea, dan Devanagari (Hindi) — bukan soal model translate,
+    // OCR-nya memang tidak pernah mengenali karakter tsb sama sekali.
+    //
+    // CATATAN PENTING soal ARAB: ML Kit Google TIDAK menyediakan recognizer
+    // untuk aksara Arab sama sekali (hanya ada: Latin, Chinese, Devanagari,
+    // Japanese, Korean). Ini keterbatasan pustaka Google, bukan sesuatu
+    // yang bisa diperbaiki lewat konfigurasi. Menerjemahkan teks Arab dari
+    // GAMBAR lewat ML Kit tidak mungkin dilakukan; lihat catatan di
+    // OcrTranslateHelper untuk opsi alternatif (mis. Google Cloud Vision
+    // API yang berbayar, atau Tesseract OCR).
+    implementation('com.google.mlkit:text-recognition-chinese:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:text-recognition-devanagari:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:text-recognition-japanese:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:text-recognition-korean:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
     implementation('com.google.mlkit:language-id:17.0.6') {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
