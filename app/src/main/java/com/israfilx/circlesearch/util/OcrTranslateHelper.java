@@ -507,7 +507,18 @@ public final class OcrTranslateHelper {
                 // juga ada rangkaian berurutan minimal 3 karakter (kata nyata),
                 // bukan sekadar karakter skrip yang tersebar di antara noise.
                 boolean hasRealWord = hasArabicOrThaiRun(tessBlocks, 3);
-                boolean realArabThai = arabThaiChars >= minArabThaiChars && hasRealWord;
+                // PERBAIKAN — tolak hasil yang cocok dengan frasa halusinasi
+                // Tesseract yang sudah dikenal (lihat KNOWN_TESS_HALLUCINATION_ROOTS)
+                // KHUSUS untuk kasus blok tunggal. Frasa umum ini terbukti dari
+                // log lapangan muncul berulang dari screenshot yang berbeda-beda
+                // dan kemungkinan besar tidak mengandung Thai/Arab sama sekali;
+                // ambang panjang/rangkaian di atas tidak bisa menyaringnya karena
+                // hasilnya secara struktur adalah kata yang sah, bukan garbage.
+                // Multi-blok tidak kena aturan ini — di sana frasa umum ini bisa
+                // saja memang bagian sah dari kalimat/percakapan lebih panjang.
+                boolean isHallucination = (tessBlocks != null && tessBlocks.size() <= 1)
+                        && isKnownTessHallucination(tessBlocks);
+                boolean realArabThai = arabThaiChars >= minArabThaiChars && hasRealWord && !isHallucination;
 
                 if (tessBlocks != null && !tessBlocks.isEmpty() && realArabThai) {
                     if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0
@@ -530,6 +541,7 @@ public final class OcrTranslateHelper {
                         + " arabThaiChars=" + arabThaiChars
                         + " minRequired=" + minArabThaiChars
                         + " hasRealWord=" + hasRealWord
+                        + " isHallucination=" + isHallucination
                         + " mlKit=" + mlKitScript + "/" + mlKitScore);
 
                 if (preferTess) {
@@ -620,6 +632,56 @@ public final class OcrTranslateHelper {
                 }
                 // spasi tidak memutus rangkaian (kata bisa dipisah OCR jadi 2 token)
             }
+        }
+        return false;
+    }
+
+    /**
+     * PERBAIKAN — daftar tolak (denylist) frasa Thai/Arab yang TERBUKTI dari
+     * log lapangan berulang kali "dihalusinasikan" Tesseract dari screenshot
+     * yang jelas-jelas berbeda konten (blok=1, MLKit skor Devanagari rendah
+     * 12-34, dari sumber yang kemungkinan besar bukan Thai/Arab sama sekali).
+     *
+     * Root cause: model LSTM Tesseract-Thai/Arab cenderung "menormalkan"
+     * pola visual noise generik (ikon kecil, watermark, karakter UI yang
+     * di-scale-up 1.5x-3.5x) menjadi frasa umum yang sering muncul di data
+     * training-nya — sapaan/basa-basi sehari-hari seperti "selamat sore"
+     * atau "apa kabar". Ini BUKAN random garbage sehingga tidak tertangkap
+     * oleh noiseRatioOf()/hasArabicOrThaiRun() (secara struktur, hasilnya
+     * memang kata Thai/Arab yang valid dan rapi).
+     *
+     * Perbandingan dilakukan setelah menghapus spasi & tanda baca ringan
+     * supaya variasi kecil (mis. "สวัสดิ" vs "สวัสดิี" vs "สวัสดิตอนเย็น")
+     * tetap tertangkap sebagai variasi dari akar frasa yang sama.
+     *
+     * CATATAN PERAWATAN: bila false-positive baru muncul berulang di masa
+     * depan (pola sama: blok=1, frasa umum, konsisten di banyak screenshot
+     * tak berhubungan), tambahkan akar frasanya ke sini.
+     */
+    private static final String[] KNOWN_TESS_HALLUCINATION_ROOTS = new String[] {
+            "สวัสดิ",       // "selamat" (pagi/siang/sore) — root umum halusinasi
+            "คุณสบายดีไหม", // "apa kabar"
+    };
+
+    /**
+     * True bila SATU-SATUNYA sinyal skrip nyata pada hasil Tesseract berasal
+     * dari frasa yang sudah dikenal sebagai halusinasi (lihat
+     * {@link #KNOWN_TESS_HALLUCINATION_ROOTS}). Hanya dipakai sebagai syarat
+     * tambahan untuk kasus rawan (blok tunggal); tidak dipakai untuk menolak
+     * teks panjang/multi-baris karena di sana frasa umum ini bisa saja
+     * memang bagian sah dari kalimat lebih panjang.
+     */
+    private static boolean isKnownTessHallucination(List<TranslatedBlock> blocks) {
+        if (blocks == null || blocks.isEmpty()) return false;
+        StringBuilder sb = new StringBuilder();
+        for (TranslatedBlock b : blocks) {
+            if (b == null || b.originalText == null) continue;
+            sb.append(b.originalText.trim());
+        }
+        String combined = sb.toString();
+        if (combined.isEmpty()) return false;
+        for (String root : KNOWN_TESS_HALLUCINATION_ROOTS) {
+            if (combined.contains(root)) return true;
         }
         return false;
     }
