@@ -337,16 +337,28 @@ public final class OcrTranslateHelper {
         Log.d(TAG, "OCR terbaik: skrip=" + bestScript + ", skor=" + bestScore
                 + ", jumlah blok=" + (bestBlocks == null ? 0 : bestBlocks.size()));
 
-        // Selalu coba Tesseract sebagai kandidat tambahan untuk Arab/Thai.
-        // ML Kit Latin sering menghasilkan sampah saat membaca aksara Thai/Arab,
-        // dan skornya kadang masih tinggi sehingga threshold lama tidak memicu fallback.
-        if (context != null && bitmap != null) {
+        // Tesseract hanya untuk kandidat Arab/Thai.
+        // Jika ML Kit sudah kuat di Latin/CJK/Devanagari, JANGAN jalankan Tesseract
+        // (menghindari hasil Latin diganti sampah Thai + mempercepat proses).
+        boolean mlKitAlreadyStrong = bestScore >= 80
+                && bestScript != null
+                && ("Latin".equals(bestScript)
+                    || "Chinese".equals(bestScript)
+                    || "Japanese".equals(bestScript)
+                    || "Korean".equals(bestScript)
+                    || "Devanagari".equals(bestScript));
+
+        if (context != null && bitmap != null && !mlKitAlreadyStrong) {
             final List<Text.TextBlock> mlKitBlocks = bestBlocks;
             final int mlKitScore = bestScore;
             final String mlKitScript = bestScript;
             tryTesseractFallback(context, bitmap, alsoTranslate, callback, generation,
                     mlKitBlocks, mlKitScore, mlKitScript);
             return;
+        }
+        if (mlKitAlreadyStrong) {
+            Log.d(TAG, "ML Kit kuat (" + bestScript + " skor=" + bestScore
+                    + "), lewati Tesseract");
         }
 
         if (bestBlocks == null || bestBlocks.isEmpty() || bestScore <= 0) {
@@ -382,13 +394,34 @@ public final class OcrTranslateHelper {
                         + " hasArabThai=" + mlKitHasScript
                         + " | Tesseract skor=" + tessScore + " hasArabThai=" + tessHasScript);
 
+                // Tesseract HANYA untuk Arab/Thai.
+                // Jangan pernah menimpa hasil ML Kit Latin/CJK/Devanagari yang kuat
+                // (bug sebelumnya: OCR Latin bagus skor 900 diganti sampah Thai).
+                boolean mlKitStrongScript = mlKitScore >= 80
+                        && mlKitScript != null
+                        && !"none".equals(mlKitScript)
+                        && ("Latin".equals(mlKitScript)
+                            || "Chinese".equals(mlKitScript)
+                            || "Japanese".equals(mlKitScript)
+                            || "Korean".equals(mlKitScript)
+                            || "Devanagari".equals(mlKitScript));
+
                 boolean preferTess = false;
-                if (tessBlocks != null && !tessBlocks.isEmpty()) {
-                    if (tessHasScript && !mlKitHasScript) preferTess = true;
-                    else if (tessHasScript && tessScore >= mlKitScore * 0.5) preferTess = true;
-                    else if (mlKitScore < 100 && tessScore > mlKitScore) preferTess = true;
-                    else if (mlKitScore < 40 && tessScore > 0) preferTess = true;
+                if (tessBlocks != null && !tessBlocks.isEmpty() && tessHasScript) {
+                    if (mlKitStrongScript) {
+                        preferTess = false; // pertahankan ML Kit
+                    } else if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0) {
+                        preferTess = true; // ML Kit gagal total
+                    } else if (!mlKitHasScript && mlKitScore < 100) {
+                        // ML Kit lemah + tidak ada aksara Arab/Thai → Tesseract boleh
+                        preferTess = true;
+                    } else if (tessScore > mlKitScore * 3 && mlKitScore < 60) {
+                        // Tesseract jauh lebih kuat dan ML Kit sangat lemah
+                        preferTess = true;
+                    }
                 }
+
+                Log.d(TAG, "preferTess=" + preferTess + " mlKitStrong=" + mlKitStrongScript);
 
                 if (preferTess) {
                     Log.d(TAG, "Memakai hasil Tesseract");
@@ -440,32 +473,46 @@ public final class OcrTranslateHelper {
     }
 
     private static boolean containsArabicOrThai(List<TranslatedBlock> blocks) {
-        if (blocks == null) return false;
+        return countArabicThaiChars(blocks) >= 3;
+    }
+
+    private static int countArabicThaiChars(List<TranslatedBlock> blocks) {
+        if (blocks == null) return 0;
+        int n = 0;
         for (TranslatedBlock b : blocks) {
             if (b == null || b.originalText == null) continue;
-            if (textHasArabicOrThai(b.originalText)) return true;
+            n += countArabicThaiInString(b.originalText);
         }
-        return false;
+        return n;
     }
 
     private static boolean containsArabicOrThaiFromMlKit(List<Text.TextBlock> blocks) {
         if (blocks == null) return false;
+        int n = 0;
         for (Text.TextBlock b : blocks) {
             if (b == null || b.getText() == null) continue;
-            if (textHasArabicOrThai(b.getText())) return true;
+            n += countArabicThaiInString(b.getText());
+            if (n >= 3) return true;
         }
-        return false;
+        return n >= 3;
     }
 
-    private static boolean textHasArabicOrThai(String text) {
+    private static int countArabicThaiInString(String text) {
+        if (text == null) return 0;
+        int n = 0;
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
             if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
                     || (c >= 0x08A0 && c <= 0x08FF) || (c >= 0xFB50 && c <= 0xFDFF)
-                    || (c >= 0xFE70 && c <= 0xFEFF)) return true;
-            if (c >= 0x0E00 && c <= 0x0E7F) return true;
+                    || (c >= 0xFE70 && c <= 0xFEFF) || (c >= 0x0E00 && c <= 0x0E7F)) {
+                n++;
+            }
         }
-        return false;
+        return n;
+    }
+
+    private static boolean textHasArabicOrThai(String text) {
+        return countArabicThaiInString(text) >= 1;
     }
 
     private static int scoreTranslatedBlocks(List<TranslatedBlock> blocks) {
