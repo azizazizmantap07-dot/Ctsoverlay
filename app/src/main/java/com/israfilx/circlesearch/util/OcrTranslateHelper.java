@@ -312,7 +312,8 @@ public final class OcrTranslateHelper {
             Log.e(TAG, "Semua OCR gagal");
             // Coba Tesseract sebagai last resort
             if (context != null && bitmap != null) {
-                tryTesseractFallback(context, bitmap, alsoTranslate, callback, generation);
+                tryTesseractFallback(context, bitmap, alsoTranslate, callback, generation,
+                        null, 0, "none");
                 return;
             }
             callback.onError(new Exception("OCR gagal pada semua skrip"));
@@ -336,11 +337,15 @@ public final class OcrTranslateHelper {
         Log.d(TAG, "OCR terbaik: skrip=" + bestScript + ", skor=" + bestScore
                 + ", jumlah blok=" + (bestBlocks == null ? 0 : bestBlocks.size()));
 
-        // Fallback Tesseract untuk Arab / Thai jika skor ML Kit rendah
-        // (threshold 80: cukup ketat supaya hanya dipakai saat ML Kit hampir kosong)
-        if (bestScore < 80 && context != null && bitmap != null) {
-            Log.d(TAG, "Skor ML Kit rendah (" + bestScore + "), coba Tesseract Arab/Thai…");
-            tryTesseractFallback(context, bitmap, alsoTranslate, callback, generation);
+        // Selalu coba Tesseract sebagai kandidat tambahan untuk Arab/Thai.
+        // ML Kit Latin sering menghasilkan sampah saat membaca aksara Thai/Arab,
+        // dan skornya kadang masih tinggi sehingga threshold lama tidak memicu fallback.
+        if (context != null && bitmap != null) {
+            final List<Text.TextBlock> mlKitBlocks = bestBlocks;
+            final int mlKitScore = bestScore;
+            final String mlKitScript = bestScript;
+            tryTesseractFallback(context, bitmap, alsoTranslate, callback, generation,
+                    mlKitBlocks, mlKitScore, mlKitScript);
             return;
         }
 
@@ -358,46 +363,127 @@ public final class OcrTranslateHelper {
     }
 
     /**
-     * Jalankan Tesseract (ara + tha) sebagai fallback.
-     * Jika traineddata belum ada, coba unduh dulu (sekali saja, gratis).
-     * Hasil berupa List&lt;TranslatedBlock&gt; yang langsung bisa dipakai overlay + translate.
+     * Jalankan Tesseract (ara + tha) dan bandingkan dengan hasil ML Kit.
+     * Prioritas: teks yang mengandung Unicode Arab/Thai > skor numerik.
      */
     private static void tryTesseractFallback(final Context context, final Bitmap bitmap,
-            final boolean alsoTranslate, final ResultCallback callback, final long generation) {
-        // Pastikan tessdata ara + tha tersedia
+            final boolean alsoTranslate, final ResultCallback callback, final long generation,
+            final List<Text.TextBlock> mlKitBlocks, final int mlKitScore, final String mlKitScript) {
         ensureTessdata(context, new ModelCallback() {
             @Override
             public void onSuccess() {
                 if (!isCurrent(generation)) return;
-                List<TranslatedBlock> blocks = runTesseractOcr(context, bitmap);
-                if (blocks == null || blocks.isEmpty()) {
-                    Log.d(TAG, "Tesseract tidak menemukan teks");
+                List<TranslatedBlock> tessBlocks = runTesseractOcr(context, bitmap);
+                int tessScore = scoreTranslatedBlocks(tessBlocks);
+                boolean tessHasScript = containsArabicOrThai(tessBlocks);
+                boolean mlKitHasScript = containsArabicOrThaiFromMlKit(mlKitBlocks);
+
+                Log.d(TAG, "Perbandingan: MLKit skor=" + mlKitScore + " script=" + mlKitScript
+                        + " hasArabThai=" + mlKitHasScript
+                        + " | Tesseract skor=" + tessScore + " hasArabThai=" + tessHasScript);
+
+                boolean preferTess = false;
+                if (tessBlocks != null && !tessBlocks.isEmpty()) {
+                    if (tessHasScript && !mlKitHasScript) preferTess = true;
+                    else if (tessHasScript && tessScore >= mlKitScore * 0.5) preferTess = true;
+                    else if (mlKitScore < 100 && tessScore > mlKitScore) preferTess = true;
+                    else if (mlKitScore < 40 && tessScore > 0) preferTess = true;
+                }
+
+                if (preferTess) {
+                    Log.d(TAG, "Memakai hasil Tesseract");
+                    if (!alsoTranslate) {
+                        callback.onSuccess(tessBlocks);
+                        return;
+                    }
+                    translateTranslatedBlocks(tessBlocks, callback, generation);
+                    return;
+                }
+
+                if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0) {
+                    if (tessBlocks != null && !tessBlocks.isEmpty()) {
+                        if (!alsoTranslate) {
+                            callback.onSuccess(tessBlocks);
+                            return;
+                        }
+                        translateTranslatedBlocks(tessBlocks, callback, generation);
+                        return;
+                    }
                     callback.onNoTextFound();
                     return;
                 }
-                Log.d(TAG, "Tesseract berhasil, blok=" + blocks.size());
                 if (!alsoTranslate) {
-                    callback.onSuccess(blocks);
+                    callback.onSuccess(toUntranslatedBlocks(mlKitBlocks));
                     return;
                 }
-                // Lanjut deteksi bahasa + translate dari teks Tesseract
-                translateTranslatedBlocks(blocks, callback, generation);
+                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation);
             }
             @Override
             public void onFailure(Exception e) {
                 if (!isCurrent(generation)) return;
-                Log.w(TAG, "Tesseract fallback gagal (traineddata?): " + e.getMessage());
-                callback.onNoTextFound();
+                Log.w(TAG, "Tesseract tidak tersedia: " + e.getMessage());
+                if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0) {
+                    callback.onNoTextFound();
+                    return;
+                }
+                if (!alsoTranslate) {
+                    callback.onSuccess(toUntranslatedBlocks(mlKitBlocks));
+                    return;
+                }
+                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation);
             }
             @Override
             public void onProgress(String message) {
-                // bisa di-forward ke UI nanti jika perlu
                 Log.d(TAG, "Tessdata: " + message);
             }
         });
     }
 
-    /** Path folder tessdata di internal storage. */
+    private static boolean containsArabicOrThai(List<TranslatedBlock> blocks) {
+        if (blocks == null) return false;
+        for (TranslatedBlock b : blocks) {
+            if (b == null || b.originalText == null) continue;
+            if (textHasArabicOrThai(b.originalText)) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsArabicOrThaiFromMlKit(List<Text.TextBlock> blocks) {
+        if (blocks == null) return false;
+        for (Text.TextBlock b : blocks) {
+            if (b == null || b.getText() == null) continue;
+            if (textHasArabicOrThai(b.getText())) return true;
+        }
+        return false;
+    }
+
+    private static boolean textHasArabicOrThai(String text) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
+                    || (c >= 0x08A0 && c <= 0x08FF) || (c >= 0xFB50 && c <= 0xFDFF)
+                    || (c >= 0xFE70 && c <= 0xFEFF)) return true;
+            if (c >= 0x0E00 && c <= 0x0E7F) return true;
+        }
+        return false;
+    }
+
+    private static int scoreTranslatedBlocks(List<TranslatedBlock> blocks) {
+        if (blocks == null) return 0;
+        int score = 0;
+        for (TranslatedBlock b : blocks) {
+            if (b == null || b.originalText == null) continue;
+            String t = b.originalText.trim();
+            if (t.isEmpty()) continue;
+            int len = t.length();
+            if (textHasArabicOrThai(t)) len *= 4;
+            Rect box = b.boundingBox;
+            if (box != null && box.height() >= 16) score += len * 2;
+            else score += len;
+        }
+        return score;
+    }
+
     private static File getTessdataDir(Context context) {
         File dir = new File(context.getFilesDir(), "tessdata");
         if (!dir.exists()) dir.mkdirs();
@@ -411,16 +497,11 @@ public final class OcrTranslateHelper {
         return ara.exists() && ara.length() > 10000 && tha.exists() && tha.length() > 10000;
     }
 
-    /**
-     * Pastikan ara.traineddata + tha.traineddata ada.
-     * Unduh dari tessdata_fast (gratis) bila belum ada.
-     */
     public static void ensureTessdata(Context context, ModelCallback callback) {
         if (isTessdataReady(context)) {
             callback.onSuccess();
             return;
         }
-        // Unduh di background thread
         new Thread(() -> {
             try {
                 File dir = getTessdataDir(context);
@@ -443,8 +524,9 @@ public final class OcrTranslateHelper {
         callback.onProgress("Mengunduh " + label + "…");
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         conn.setConnectTimeout(30000);
-        conn.setReadTimeout(60000);
+        conn.setReadTimeout(120000);
         conn.setInstanceFollowRedirects(true);
+        conn.setRequestProperty("User-Agent", "CircleSearch/1.9");
         try (InputStream in = new BufferedInputStream(conn.getInputStream());
              FileOutputStream fos = new FileOutputStream(out)) {
             byte[] buf = new byte[8192];
@@ -459,41 +541,84 @@ public final class OcrTranslateHelper {
         Log.d(TAG, "Downloaded " + out.getName() + " size=" + out.length());
     }
 
-    /**
-     * Jalankan Tesseract dengan bahasa ara+tha.
-     * Mengembalikan list TranslatedBlock (teks asli + bounding box per baris).
-     */
     private static List<TranslatedBlock> runTesseractOcr(Context context, Bitmap bitmap) {
+        Bitmap work = prepareBitmapForTesseract(bitmap);
+        List<TranslatedBlock> best = null;
+        int bestScore = -1;
+
+        String[] langs = new String[] { "tha", "ara", "ara+tha" };
+        for (String lang : langs) {
+            List<TranslatedBlock> result = runTesseractWithLang(context, work, lang);
+            int sc = scoreTranslatedBlocks(result);
+            Log.d(TAG, "Tesseract lang=" + lang + " skor=" + sc
+                    + " hasScript=" + containsArabicOrThai(result));
+            if (result != null && sc > bestScore) {
+                bestScore = sc;
+                best = result;
+            }
+            if (containsArabicOrThai(result) && sc > 30) break;
+        }
+
+        if (work != bitmap && work != null && !work.isRecycled()) {
+            try { work.recycle(); } catch (Exception ignored) {}
+        }
+        return best;
+    }
+
+    private static Bitmap prepareBitmapForTesseract(Bitmap src) {
+        if (src == null) return null;
+        Bitmap b = src;
+        if (src.getWidth() < 400 || src.getHeight() < 200) {
+            float scale = Math.max(400f / src.getWidth(), 200f / src.getHeight());
+            scale = Math.min(scale, 3f);
+            int w = Math.round(src.getWidth() * scale);
+            int h = Math.round(src.getHeight() * scale);
+            b = Bitmap.createScaledBitmap(src, w, h, true);
+        }
+        if (b.getConfig() != Bitmap.Config.ARGB_8888) {
+            Bitmap converted = b.copy(Bitmap.Config.ARGB_8888, false);
+            if (b != src && !b.isRecycled()) {
+                try { b.recycle(); } catch (Exception ignored) {}
+            }
+            b = converted;
+        }
+        return b;
+    }
+
+    private static List<TranslatedBlock> runTesseractWithLang(Context context, Bitmap bitmap, String lang) {
         TessBaseAPI tess = null;
         try {
             tess = new TessBaseAPI();
-            // datapath = parent of "tessdata" folder
             String dataPath = context.getFilesDir().getAbsolutePath() + "/";
-            // Init dengan Arab + Thai (bisa deteksi campuran)
-            boolean ok = tess.init(dataPath, "ara+tha");
+            boolean ok;
+            try {
+                ok = tess.init(dataPath, lang, TessBaseAPI.OEM_LSTM_ONLY);
+            } catch (Throwable t) {
+                ok = tess.init(dataPath, lang);
+            }
             if (!ok) {
-                Log.e(TAG, "TessBaseAPI.init gagal");
+                Log.w(TAG, "TessBaseAPI.init gagal untuk " + lang);
                 return null;
             }
             tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO);
             tess.setImage(bitmap);
 
-            // Harus panggil getUTF8Text dulu agar recognition jalan
-            tess.getUTF8Text();
+            String fullText = tess.getUTF8Text();
+            if (fullText == null) fullText = "";
 
             List<TranslatedBlock> blocks = new ArrayList<>();
             ResultIterator it = tess.getResultIterator();
             if (it != null) {
                 try {
-                    // Ambil per TEXTLINE supaya bounding box masuk akal untuk overlay
                     it.begin();
                     do {
                         String text = it.getUTF8Text(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                         if (text == null) continue;
                         text = text.trim();
                         if (text.isEmpty()) continue;
+                        if (isMostlyGarbageLine(text)) continue;
                         Rect rect = it.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
-                        if (rect != null && rect.width() > 0 && rect.height() > 0) {
+                        if (rect != null && rect.width() > 2 && rect.height() > 2) {
                             blocks.add(new TranslatedBlock(text, text, new Rect(rect)));
                         } else {
                             blocks.add(new TranslatedBlock(text, text,
@@ -505,23 +630,48 @@ public final class OcrTranslateHelper {
                 }
             }
 
-            // Jika iterator kosong, ambil seluruh teks sebagai 1 blok
-            if (blocks.isEmpty()) {
-                String full = tess.getUTF8Text();
-                if (full != null && !full.trim().isEmpty()) {
-                    blocks.add(new TranslatedBlock(full.trim(), full.trim(),
+            if (blocks.isEmpty() && !fullText.trim().isEmpty()) {
+                String cleaned = fullText.trim();
+                if (!isMostlyGarbageLine(cleaned)) {
+                    blocks.add(new TranslatedBlock(cleaned, cleaned,
                             new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight())));
                 }
             }
             return blocks.isEmpty() ? null : blocks;
         } catch (Exception e) {
-            Log.e(TAG, "runTesseractOcr error", e);
+            Log.e(TAG, "runTesseractWithLang(" + lang + ") error", e);
             return null;
         } finally {
             if (tess != null) {
                 try { tess.recycle(); } catch (Exception ignored) {}
             }
         }
+    }
+
+    private static boolean isMostlyGarbageLine(String text) {
+        if (text == null || text.length() < 2) return true;
+        int letters = 0;
+        int arabicThai = 0;
+        int weird = 0;
+        int total = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isWhitespace(c)) continue;
+            total++;
+            if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0E00 && c <= 0x0E7F)) {
+                arabicThai++;
+                letters++;
+            } else if (Character.isLetter(c)) {
+                letters++;
+            } else if (c == 0xFFFD || (c > 0x024F && c < 0x0600)) {
+                weird++;
+            }
+        }
+        if (total == 0) return true;
+        if (arabicThai >= 2 || (arabicThai > 0 && arabicThai * 2 >= total)) return false;
+        if (weird * 2 >= total) return true;
+        if (letters * 3 < total) return true;
+        return false;
     }
 
     /**
@@ -549,6 +699,19 @@ public final class OcrTranslateHelper {
             return;
         }
 
+        // Paksa bahasa berdasarkan aksara Unicode — lebih andal daripada
+        // language-id ML Kit yang sering gagal pada teks Arab/Thai pendek.
+        String forced = detectScriptLanguage(combined);
+        if (forced != null) {
+            Log.d(TAG, "Bahasa dipaksa dari aksara: " + forced);
+            if (TARGET_LANGUAGE.equals(forced)) {
+                callback.onSuccess(blocks);
+                return;
+            }
+            doTranslateOnTranslatedBlocks(blocks, forced, callback, generation);
+            return;
+        }
+
         LanguageIdentificationOptions options = new LanguageIdentificationOptions.Builder()
                 .setConfidenceThreshold(LANGUAGE_CONFIDENCE_THRESHOLD)
                 .build();
@@ -557,13 +720,12 @@ public final class OcrTranslateHelper {
                 .addOnSuccessListener(langCode -> {
                     if (!isCurrent(generation)) return;
                     if (langCode == null || "und".equals(langCode)) {
-                        // coba possible languages
                         identifier.identifyPossibleLanguages(combined)
                                 .addOnSuccessListener(cands -> {
                                     if (!isCurrent(generation)) return;
                                     String best = pickBestCandidate(cands);
                                     if (best == null) {
-                                        callback.onSuccess(blocks); // tampilkan asli
+                                        callback.onSuccess(blocks);
                                         return;
                                     }
                                     doTranslateOnTranslatedBlocks(blocks, best, callback, generation);
@@ -582,6 +744,22 @@ public final class OcrTranslateHelper {
                 .addOnFailureListener(e -> {
                     if (isCurrent(generation)) callback.onSuccess(blocks);
                 });
+    }
+
+    /** Deteksi th/ar dari rentang Unicode. null jika tidak jelas. */
+    private static String detectScriptLanguage(String text) {
+        int thai = 0, arab = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c >= 0x0E00 && c <= 0x0E7F) thai++;
+            else if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
+                    || (c >= 0xFB50 && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF)) arab++;
+        }
+        if (thai >= 3 && thai >= arab) return TranslateLanguage.THAI;
+        if (arab >= 3 && arab >= thai) return TranslateLanguage.ARABIC;
+        if (thai >= 1 && arab == 0) return TranslateLanguage.THAI;
+        if (arab >= 1 && thai == 0) return TranslateLanguage.ARABIC;
+        return null;
     }
 
     private static void doTranslateOnTranslatedBlocks(
