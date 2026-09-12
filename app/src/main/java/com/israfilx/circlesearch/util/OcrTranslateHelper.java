@@ -358,20 +358,24 @@ public final class OcrTranslateHelper {
         Log.d(TAG, "OCR terbaik: skrip=" + bestScript + ", skor=" + bestScore
                 + ", jumlah blok=" + (bestBlocks == null ? 0 : bestBlocks.size()));
 
-        // Tesseract hanya untuk kandidat Arab/Thai.
-        // Latin/CJK: ambang lebih rendah (teks pendek sering skor 25–50).
-        // Devanagari: ambang lebih tinggi — Arab sering salah terbaca sebagai Devanagari.
-        boolean mlKitAlreadyStrong = false;
-        if (bestScript != null && bestScore > 0) {
-            if ("Latin".equals(bestScript) || "Chinese".equals(bestScript)
-                    || "Japanese".equals(bestScript) || "Korean".equals(bestScript)) {
-                mlKitAlreadyStrong = bestScore >= 25;
-            } else if ("Devanagari".equals(bestScript)) {
-                mlKitAlreadyStrong = bestScore >= 80;
+        // === ROUTING DETERMINISTIK (bukan perang skor) ===
+        // CJK/Korea/Jepang: ML Kit selalu menang jika ada hasil.
+        // Latin: menang hanya jika teksnya benar-benar huruf Latin (bukan noise).
+        // Devanagari kuat (>=40): ML Kit (Hindi dll).
+        // Sisanya (lemah / none): boleh probe Tesseract untuk Arab/Thai.
+        boolean useMlKitOnly = false;
+        if (bestScore > 0 && bestScript != null) {
+            if ("Chinese".equals(bestScript) || "Japanese".equals(bestScript)
+                    || "Korean".equals(bestScript)) {
+                useMlKitOnly = true;
+            } else if ("Latin".equals(bestScript) && mlKitBlocksMostlyLatin(bestBlocks)) {
+                useMlKitOnly = true;
+            } else if ("Devanagari".equals(bestScript) && bestScore >= 40) {
+                useMlKitOnly = true;
             }
         }
 
-        if (context != null && bitmap != null && !mlKitAlreadyStrong) {
+        if (context != null && bitmap != null && !useMlKitOnly) {
             final List<Text.TextBlock> mlKitBlocks = bestBlocks;
             final int mlKitScore = bestScore;
             final String mlKitScript = bestScript;
@@ -379,9 +383,8 @@ public final class OcrTranslateHelper {
                     mlKitBlocks, mlKitScore, mlKitScript);
             return;
         }
-        if (mlKitAlreadyStrong) {
-            Log.d(TAG, "ML Kit kuat (" + bestScript + " skor=" + bestScore
-                    + "), lewati Tesseract");
+        if (useMlKitOnly) {
+            Log.d(TAG, "Routing: ML Kit only (" + bestScript + " skor=" + bestScore + ")");
         }
 
         if (bestBlocks == null || bestBlocks.isEmpty() || bestScore <= 0) {
@@ -417,32 +420,32 @@ public final class OcrTranslateHelper {
                         + " hasArabThai=" + mlKitHasScript
                         + " | Tesseract skor=" + tessScore + " hasArabThai=" + tessHasScript);
 
-                // Tesseract HANYA untuk Arab/Thai — jangan timpa Latin/CJK.
-                boolean mlKitProtectLatinCjk = mlKitScript != null
-                        && mlKitScore >= 25
-                        && ("Latin".equals(mlKitScript)
+                // Aturan ketat: Tesseract hanya jika ada aksara Arab/Thai nyata
+                // DAN ML Kit tidak punya hasil Latin/CJK yang valid.
+                boolean preferTess = false;
+                int arabThaiChars = countArabicThaiChars(tessBlocks);
+                boolean realArabThai = arabThaiChars >= 5; // minimal 5 huruf skrip
+
+                if (tessBlocks != null && !tessBlocks.isEmpty() && realArabThai) {
+                    if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0
+                            || "none".equals(mlKitScript)) {
+                        preferTess = true;
+                    } else if ("Latin".equals(mlKitScript)
                             || "Chinese".equals(mlKitScript)
                             || "Japanese".equals(mlKitScript)
-                            || "Korean".equals(mlKitScript));
-                boolean mlKitStrongDevanagari = "Devanagari".equals(mlKitScript) && mlKitScore >= 80;
-                boolean mlKitStrongScript = mlKitProtectLatinCjk || mlKitStrongDevanagari;
-
-                boolean preferTess = false;
-                if (tessBlocks != null && !tessBlocks.isEmpty() && tessHasScript) {
-                    if (mlKitStrongScript) {
+                            || "Korean".equals(mlKitScript)) {
+                        // JANGAN TIMPA — meskipun skor ML Kit rendah
                         preferTess = false;
-                    } else if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0
-                            || "none".equals(mlKitScript)) {
-                        preferTess = true; // ML Kit gagal
-                    } else if ("Devanagari".equals(mlKitScript) && mlKitScore < 80) {
-                        // Arab sering terbaca Devanagari lemah → izinkan Tesseract
+                    } else if ("Devanagari".equals(mlKitScript) && mlKitScore < 40) {
                         preferTess = true;
-                    } else if (!mlKitHasScript && mlKitScore < 25) {
+                    } else if (mlKitScore < 15) {
                         preferTess = true;
                     }
                 }
 
-                Log.d(TAG, "preferTess=" + preferTess + " mlKitStrong=" + mlKitStrongScript);
+                Log.d(TAG, "preferTess=" + preferTess
+                        + " arabThaiChars=" + arabThaiChars
+                        + " mlKit=" + mlKitScript + "/" + mlKitScore);
 
                 if (preferTess) {
                     Log.d(TAG, "Memakai hasil Tesseract");
@@ -495,6 +498,24 @@ public final class OcrTranslateHelper {
 
     private static boolean containsArabicOrThai(List<TranslatedBlock> blocks) {
         return countArabicThaiChars(blocks) >= 3;
+    }
+
+    /** True jika hasil ML Kit Latin didominasi huruf A–Z (bukan noise). */
+    private static boolean mlKitBlocksMostlyLatin(List<Text.TextBlock> blocks) {
+        if (blocks == null) return false;
+        int latin = 0, other = 0;
+        for (Text.TextBlock b : blocks) {
+            if (b == null || b.getText() == null) continue;
+            String t = b.getText();
+            for (int i = 0; i < t.length(); i++) {
+                char c = t.charAt(i);
+                if (Character.isWhitespace(c) || Character.isDigit(c)) continue;
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                        || (c >= 0x00C0 && c <= 0x024F)) latin++;
+                else other++;
+            }
+        }
+        return latin >= 3 && latin >= other;
     }
 
     private static int countArabicThaiChars(List<TranslatedBlock> blocks) {
@@ -1104,6 +1125,12 @@ public final class OcrTranslateHelper {
             case "fil": // Language ID
             case "tl":  // Translate
             case "tgl":
+            case "ceb": // Cebuano → Tagalog (paling dekat yang didukung)
+            case "ilo": // Ilokano
+            case "war": // Waray
+            case "pam": // Kapampangan
+            case "bik": // Bikol
+            case "hil": // Hiligaynon
                 return TranslateLanguage.TAGALOG;
             case "iw": // kode lama Ibrani
                 return TranslateLanguage.HEBREW;
@@ -1375,8 +1402,19 @@ public final class OcrTranslateHelper {
         // Paksa bahasa dari aksara Unicode / skrip OCR (CJK, Hindi, Arab, Thai).
         // LanguageIdentifier sering salah (und/ca/ig) untuk teks non-Latin.
         String forcedLang = detectScriptLanguage(combined.toString());
+        String fromOcr = languageFromOcrScript(ocrScript);
+        // Devanagari OCR sering salah diklasifikasi Unicode sebagai Bengali.
+        // Percayai skrip OCR Devanagari → Hindi, kecuali teks jelas Bengali murni.
+        if ("Devanagari".equals(ocrScript) && fromOcr != null) {
+            if (forcedLang == null
+                    || TranslateLanguage.BENGALI.equals(forcedLang)
+                    || TranslateLanguage.HINDI.equals(forcedLang)
+                    || TranslateLanguage.MARATHI.equals(forcedLang)) {
+                forcedLang = fromOcr; // hi
+            }
+        }
         if (forcedLang == null) {
-            forcedLang = languageFromOcrScript(ocrScript);
+            forcedLang = fromOcr;
         }
         if (forcedLang != null) {
             Log.d(TAG, "Bahasa dipaksa dari skrip/OCR: " + forcedLang
