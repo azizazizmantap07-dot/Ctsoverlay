@@ -1260,8 +1260,7 @@ public final class OcrTranslateHelper {
             List<TranslatedBlock> blocks, String sourceLang,
             ResultCallback callback, long generation) {
         String norm = normalizeLanguageCode(sourceLang);
-        if (norm != null) sourceLang = norm;
-        final String lang = sourceLang;
+        final String lang = (norm != null) ? norm : sourceLang;
         isModelDownloaded(lang, new ModelCallback() {
             @Override
             public void onSuccess() {
@@ -1305,7 +1304,7 @@ public final class OcrTranslateHelper {
             public void onFailure(Exception e) {
                 if (!isCurrent(generation)) return;
                 Log.w(TAG, "Model " + lang + " belum diunduh untuk hasil Tesseract");
-                callback.onModelNotDownloaded(sourceLang);
+                callback.onModelNotDownloaded(lang);
                 callback.onSuccess(blocks);
             }
         });
@@ -1649,8 +1648,7 @@ public final class OcrTranslateHelper {
             ResultCallback callback, long generation) {
 
         String normalized = normalizeLanguageCode(sourceLanguageCode);
-        if (normalized != null) sourceLanguageCode = normalized;
-        final String lang = sourceLanguageCode;
+        final String lang = (normalized != null) ? normalized : sourceLanguageCode;
         Log.d(TAG, "translateBlocksIfModelAvailable lang=" + lang);
 
         isModelDownloaded(lang, new ModelCallback() {
