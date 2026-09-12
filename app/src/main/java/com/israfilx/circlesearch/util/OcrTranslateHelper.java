@@ -164,6 +164,52 @@ public final class OcrTranslateHelper {
      * meloloskan frasa pendek valid ("Selamat", "Battery", dst).
      */
     private static final int MIN_BLOCK_CHARS_FOR_LANG_DETECT = 6;
+
+    /**
+     * Skor OCR (dari {@link #scoreOcrBlocks}) di bawah ini dianggap TERLALU
+     * LEMAH untuk dipercaya sebagai konten sungguhan — biasanya 1 blok kecil
+     * berisi noise UI (jam, ikon, badge, watermark) yang kebetulan
+     * di-OCR/diklasifikasikan sebagai aksara non-Latin oleh salah satu
+     * recognizer ML Kit.
+     *
+     * PERBAIKAN BUG — sebelum ada ambang ini, blok tunggal dengan skor
+     * serendah 4-30 tetap "dipaksa" ke bahasa tertentu (mis. hi) hanya
+     * karena mengandung 1-2 karakter aksara Devanagari palsu, menyebabkan
+     * teks yang bukan bahasa itu sama sekali ikut ditranslate/dipaksa.
+     * Lihat log: skor=14/22/28/48/52/56/58 jumlah blok=1 semuanya salah
+     * dipaksa "hi" sebelum perbaikan ini.
+     *
+     * Dipakai untuk skrip yang RAWAN false-positive dari 1-2 karakter
+     * (Devanagari dkk, dan aksara lain yang dideteksi murni dari rentang
+     * Unicode tanpa OCR khusus). Skrip yang OCR-nya sendiri sudah punya
+     * recognizer khusus dan routing ketat (CJK/Korean — lihat
+     * {@link #MIN_OCR_SCORE_FOR_FORCED_LANGUAGE_CJK}) memakai ambang
+     * yang jauh lebih rendah karena jauh lebih jarang salah.
+     *
+     * Di bawah ambang ini, translate TETAP dicoba tapi lewat jalur
+     * LanguageIdentifier biasa (yang sudah disanitasi ketat), BUKAN
+     * lewat forced-language dari aksara/skrip OCR.
+     */
+    private static final int MIN_OCR_SCORE_FOR_FORCED_LANGUAGE = 40;
+
+    /**
+     * Ambang lebih rendah khusus untuk hasil OCR CJK/Korean (recognizer
+     * khusus ML Kit, bukan tebakan rentang Unicode generik). Recognizer
+     * Chinese/Japanese/Korean ML Kit sudah cukup andal bahkan pada blok
+     * pendek (lihat log: Korean skor=38 jumlah blok=1 adalah hasil valid,
+     * bukan noise) — beda dengan Devanagari yang sering salah-klasifikasi
+     * elemen UI kecil sebagai aksara Hindi.
+     */
+    private static final int MIN_OCR_SCORE_FOR_FORCED_LANGUAGE_CJK = 15;
+
+    /**
+     * Jumlah karakter aksara non-Latin minimum di dalam teks gabungan
+     * sebelum {@link #detectScriptLanguage} boleh memaksa bahasa hanya
+     * berdasarkan 1 karakter yang match suatu rentang Unicode. Menaikkan
+     * ini dari efektif "1" mencegah 1 karakter noise/salah-OCR memaksa
+     * seluruh blok diterjemahkan ke bahasa yang salah.
+     */
+    private static final int MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE = 3;
     /**
      * Ambang confidence untuk {@link LanguageIdentifier}, DITURUNKAN dari
      * default 0.5 menjadi 0.35. Screenshot "1 layar" hampir selalu berisi
@@ -397,7 +443,7 @@ public final class OcrTranslateHelper {
             callback.onSuccess(toUntranslatedBlocks(bestBlocks));
             return;
         }
-        detectLanguageAndTranslateBlocks(bestBlocks, callback, generation, bestScript);
+        detectLanguageAndTranslateBlocks(bestBlocks, callback, generation, bestScript, bestScore);
     }
 
     /**
@@ -473,7 +519,7 @@ public final class OcrTranslateHelper {
                     callback.onSuccess(toUntranslatedBlocks(mlKitBlocks));
                     return;
                 }
-                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation, mlKitScript);
+                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation, mlKitScript, mlKitScore);
             }
             @Override
             public void onFailure(Exception e) {
@@ -487,7 +533,7 @@ public final class OcrTranslateHelper {
                     callback.onSuccess(toUntranslatedBlocks(mlKitBlocks));
                     return;
                 }
-                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation, mlKitScript);
+                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation, mlKitScript, mlKitScore);
             }
             @Override
             public void onProgress(String message) {
@@ -570,7 +616,39 @@ public final class OcrTranslateHelper {
             if (box != null && box.height() >= 16) score += len * 2;
             else score += len;
         }
+        // PERBAIKAN BUG: skor ini menentukan tessScore yang dibandingkan
+        // langsung dengan mlKitScore untuk memutuskan preferTess (lihat
+        // tryTesseractFallback). Tanpa penalti noise, 1 baris garbage
+        // panjang (mis. "‏اح‎" dicampur simbol acak) bisa mengalahkan
+        // hasil ML Kit yang valid hanya karena panjang teksnya besar.
+        double noiseRatio = noiseRatioOf(blocks);
+        if (noiseRatio >= 0.35) {
+            score = (int) (score * 0.15);
+        } else if (noiseRatio >= 0.20) {
+            score = (int) (score * 0.5);
+        }
         return score;
+    }
+
+    /** Proporsi karakter "aneh" (bukan huruf/angka/tanda baca wajar/spasi). */
+    private static double noiseRatioOf(List<TranslatedBlock> blocks) {
+        if (blocks == null) return 0;
+        int noise = 0, nonSpace = 0;
+        for (TranslatedBlock b : blocks) {
+            if (b == null || b.originalText == null) continue;
+            String t = b.originalText;
+            for (int i = 0; i < t.length(); i++) {
+                char c = t.charAt(i);
+                if (Character.isWhitespace(c)) continue;
+                nonSpace++;
+                boolean isScriptChar = (c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
+                        || (c >= 0xFB50 && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF)
+                        || (c >= 0x0E00 && c <= 0x0E7F);
+                if (isScriptChar || Character.isLetterOrDigit(c) || isBenignPunctuation(c)) continue;
+                noise++;
+            }
+        }
+        return nonSpace == 0 ? 0 : (double) noise / nonSpace;
     }
 
     private static File getTessdataDir(Context context) {
@@ -729,13 +807,14 @@ public final class OcrTranslateHelper {
      */
     private static int scoreTranslatedBlocksForLang(List<TranslatedBlock> blocks, String lang) {
         if (blocks == null) return 0;
-        int arab = 0, thai = 0, other = 0;
+        int arab = 0, thai = 0, other = 0, noise = 0, nonSpace = 0;
         for (TranslatedBlock b : blocks) {
             if (b == null || b.originalText == null) continue;
             String t = b.originalText;
             for (int i = 0; i < t.length(); i++) {
                 char c = t.charAt(i);
                 if (Character.isWhitespace(c)) continue;
+                nonSpace++;
                 if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
                         || (c >= 0xFB50 && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF)) {
                     arab++;
@@ -743,6 +822,11 @@ public final class OcrTranslateHelper {
                     thai++;
                 } else if (Character.isLetterOrDigit(c)) {
                     other++;
+                } else if (!isBenignPunctuation(c)) {
+                    // Simbol acak, tanda RTL/kontrol, replacement char, dsb.
+                    // Sample garbage khas Tesseract mengandung banyak ini
+                    // (mis. "‏‎", "|", "٠" tunggal di antara noise, dst).
+                    noise++;
                 }
             }
         }
@@ -765,7 +849,42 @@ public final class OcrTranslateHelper {
         // Penalti kuat jika model salah skrip (mis. tha menghasilkan banyak Arab palsu, atau sebaliknya)
         if ("ara".equals(lang) && thai > arab) score = score / 4;
         if ("tha".equals(lang) && arab > thai) score = score / 4;
+
+        // PERBAIKAN BUG — penalti kepadatan noise: Tesseract kadang
+        // menghasilkan sample yang secara teknis punya banyak karakter
+        // aksara Arab/Thai tapi sebenarnya garbage (mis. "رو اح م09ر"
+        // atau baris penuh simbol RTL/kontrol tercampur). Bila proporsi
+        // karakter "aneh" (bukan huruf/angka/tanda baca wajar) terlalu
+        // tinggi dibanding total karakter non-spasi, skor dipotong tajam
+        // supaya hasil semacam ini tidak "menang" lawan ML Kit hanya
+        // karena panjang teksnya kebetulan besar.
+        if (nonSpace > 0) {
+            double noiseRatio = (double) noise / nonSpace;
+            if (noiseRatio >= 0.35) {
+                score = (int) (score * 0.15);
+            } else if (noiseRatio >= 0.20) {
+                score = (int) (score * 0.5);
+            }
+        }
         return score;
+    }
+
+    /** Tanda baca umum yang wajar muncul di teks nyata (jangan dihitung noise). */
+    private static boolean isBenignPunctuation(char c) {
+        switch (c) {
+            case '.': case ',': case '!': case '?': case ':': case ';':
+            case '-': case '_': case '\'': case '"': case '(': case ')':
+            case '[': case ']': case '/': case '\\': case '%': case '&':
+            case '+': case '=': case '@': case '#': case '*':
+            case '،': // koma Arab
+            case '؛': // titik koma Arab
+            case '؟': // tanda tanya Arab
+            case '๐': case '๑': case '๒': case '๓': case '๔':
+            case '๕': case '๖': case '๗': case '๘': case '๙': // angka Thai
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static Bitmap prepareBitmapForTesseract(Bitmap src) {
@@ -995,18 +1114,28 @@ public final class OcrTranslateHelper {
         identifier.identifyLanguage(combined)
                 .addOnSuccessListener(langCode -> {
                     if (!isCurrent(generation)) return;
+                    // PERBAIKAN BUG: sanitized == null harus SELALU berarti
+                    // "kode ini tidak boleh dipakai apa adanya", terlepas dari
+                    // apakah langCode mentahnya kebetulan ada di daftar
+                    // isUnreliableLatinGuess() atau tidak. Sebelumnya, bila
+                    // sanitized null TAPI langCode mentah tidak ada di daftar
+                    // itu (mis. kode 2-huruf lain yang tidak dikenal), kode
+                    // lanjut memakai langCode mentah tanpa validasi lebih
+                    // lanjut. Sekarang null dari sanitasi selalu memicu fallback
+                    // ke identifyPossibleLanguages.
                     String sanitized = sanitizeDetectedLanguage(combined, langCode);
-                    if (sanitized != null) langCode = sanitized;
-                    if (langCode == null || "und".equals(langCode) || isUnreliableLatinGuess(langCode)) {
+                    boolean rejected = (sanitized == null) || "und".equals(sanitized);
+                    if (!rejected) langCode = sanitized;
+                    if (rejected) {
                         identifier.identifyPossibleLanguages(combined)
                                 .addOnSuccessListener(cands -> {
                                     if (!isCurrent(generation)) return;
                                     String best = pickBestCandidate(cands);
                                     if (best != null) {
                                         String s2 = sanitizeDetectedLanguage(combined, best);
-                                        if (s2 != null) best = s2;
+                                        best = s2; // null bila kandidat ini juga ditolak
                                     }
-                                    if (best == null || isUnreliableLatinGuess(best)) {
+                                    if (best == null || "und".equals(best)) {
                                         callback.onSuccess(blocks);
                                         return;
                                     }
@@ -1081,9 +1210,16 @@ public final class OcrTranslateHelper {
         // CJK: kana menang → Jepang; kalau hanya Hanzi → Cina
         if (kana >= 2) return TranslateLanguage.JAPANESE;
         if (cjk >= 3 && cjk >= best) return TranslateLanguage.CHINESE;
-        if (best >= 3) return lang;
-        if (best >= 1 && (latin + latinExt) < best * 2) return lang;
-        if (cjk >= 1) return TranslateLanguage.CHINESE;
+        if (best >= MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE) return lang;
+        // PERBAIKAN BUG: sebelumnya "best >= 1" cukup untuk memaksa bahasa
+        // asal jumlah huruf Latin di sekitarnya tidak lebih dari 2x lipatnya.
+        // Ini membuat 1 karakter aksara non-Latin yang salah-OCR (noise UI,
+        // ikon, watermark) memaksa SELURUH blok diterjemahkan ke bahasa
+        // yang salah (lihat log: skor OCR serendah 4-30 dengan 1 blok tetap
+        // dipaksa "hi"). Sekarang minimal MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE
+        // karakter aksara sebelum dipaksa; di bawah itu, biarkan pipeline
+        // jatuh ke LanguageIdentifier biasa yang sudah disanitasi ketat.
+        if (cjk >= 1 && cjk >= MIN_SCRIPT_CHARS_TO_FORCE_LANGUAGE) return TranslateLanguage.CHINESE;
         return null;
     }
 
@@ -1224,8 +1360,25 @@ public final class OcrTranslateHelper {
             case "ka":
                 return TranslateLanguage.GEORGIAN;
             default:
-                // kembalikan kode apa adanya jika sudah 2 huruf
-                return c.length() == 2 ? c : null;
+                // Kode tidak dikenal / tidak didukung Translate ML Kit (ha, yo, mg, …)
+                return null;
+        }
+    }
+
+    /** True jika kode bahasa didukung model Translate ML Kit yang kita pakai. */
+    private static boolean isSupportedTranslateLanguage(String code) {
+        if (code == null) return false;
+        switch (code) {
+            case "en": case "zh": case "ja": case "ko": case "ar": case "es":
+            case "fr": case "de": case "pt": case "ru": case "th": case "vi":
+            case "hi": case "tr": case "it": case "nl": case "pl": case "uk":
+            case "ms": case "tl": case "bn": case "ta": case "te": case "gu":
+            case "kn": case "mr": case "ur": case "fa": case "he": case "el":
+            case "cs": case "ro": case "hu": case "sv": case "fi": case "da":
+            case "no": case "sk": case "bg": case "hr": case "ka": case "id":
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -1242,21 +1395,19 @@ public final class OcrTranslateHelper {
             }
             return fromScript;
         }
-        // Latin: tolak kode bahasa yang tidak masuk akal untuk teks Latin biasa
-        // (LanguageIdentifier kadang mengembalikan ca/gl/eo/ht untuk UI campuran)
-        if (isUnreliableLatinGuess(detected)) {
-            // Default aman: Inggris jika banyak huruf Latin
+        // Latin: tolak deteksi tidak andal ATAU tidak didukung Translate
+        if (isUnreliableLatinGuess(detected) || !isSupportedTranslateLanguage(detected)) {
             int latinLetters = 0;
             for (int i = 0; i < text.length(); i++) {
                 char c = text.charAt(i);
                 if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) latinLetters++;
             }
-            if (latinLetters >= 8) {
+            if (latinLetters >= 6) {
                 Log.d(TAG, "LanguageIdentifier='" + detected
-                        + "' tidak andal untuk teks Latin, pakai en");
+                        + "' tidak didukung/andal, pakai en");
                 return TranslateLanguage.ENGLISH;
             }
-            return null; // biarkan fallback lain
+            return null;
         }
         return detected;
     }
@@ -1275,8 +1426,20 @@ public final class OcrTranslateHelper {
             case "sq": // Albanian
             case "mt": // Maltese
             case "is": // Icelandic
-            case "af": // Afrikaans (sering salah di UI pendek)
+            case "af": // Afrikaans
             case "sw": // Swahili
+            case "ha": // Hausa
+            case "yo": // Yoruba
+            case "mg": // Malagasy
+            case "so": // Somali
+            case "zu": // Zulu
+            case "xh": // Xhosa
+            case "ny": // Chichewa
+            case "sn": // Shona
+            case "st": // Sesotho
+            case "tn": // Tswana
+            case "lg": // Ganda
+            case "rw": // Kinyarwanda
                 return true;
             default:
                 return false;
@@ -1362,12 +1525,12 @@ public final class OcrTranslateHelper {
 
     private static void detectLanguageAndTranslateBlocks(
             List<Text.TextBlock> textBlocks, ResultCallback callback, long generation) {
-        detectLanguageAndTranslateBlocks(textBlocks, callback, generation, null);
+        detectLanguageAndTranslateBlocks(textBlocks, callback, generation, null, Integer.MAX_VALUE);
     }
 
     private static void detectLanguageAndTranslateBlocks(
             List<Text.TextBlock> textBlocks, ResultCallback callback, long generation,
-            String ocrScript) {
+            String ocrScript, int ocrScore) {
         List<Text.TextBlock> significantForDetection = filterSignificantBlocks(textBlocks);
         List<Text.TextBlock> blocksForLangDetect =
                 significantForDetection.isEmpty() ? textBlocks : significantForDetection;
@@ -1416,15 +1579,34 @@ public final class OcrTranslateHelper {
         if (forcedLang == null) {
             forcedLang = fromOcr;
         }
-        if (forcedLang != null) {
+        // PERBAIKAN BUG: sebelumnya forcedLang langsung dipakai tanpa
+        // melihat seberapa kuat sinyal OCR-nya. Blok tunggal kecil
+        // (noise UI: jam, ikon, badge) dengan skor rendah tapi kebetulan
+        // diklasifikasikan sebagai aksara non-Latin oleh salah satu
+        // recognizer akan memaksa translate ke bahasa yang salah.
+        // Sekarang forced-language hanya dipakai bila skor OCR blok
+        // sumber cukup meyakinkan. Ambang lebih rendah untuk CJK/Korean
+        // (recognizer khusus, jarang salah) dibanding skrip lain seperti
+        // Devanagari (sering salah-klasifikasi elemen UI kecil).
+        boolean isCjkScript = "Chinese".equals(ocrScript) || "Japanese".equals(ocrScript)
+                || "Korean".equals(ocrScript);
+        int requiredScore = isCjkScript
+                ? MIN_OCR_SCORE_FOR_FORCED_LANGUAGE_CJK
+                : MIN_OCR_SCORE_FOR_FORCED_LANGUAGE;
+        if (forcedLang != null && ocrScore >= requiredScore) {
             Log.d(TAG, "Bahasa dipaksa dari skrip/OCR: " + forcedLang
-                    + " (ocrScript=" + ocrScript + ")");
+                    + " (ocrScript=" + ocrScript + ", ocrScore=" + ocrScore + ")");
             if (TARGET_LANGUAGE.equals(forcedLang)) {
                 callback.onSuccess(toUntranslatedBlocks(textBlocks));
                 return;
             }
             translateBlocksIfModelAvailable(textBlocks, forcedLang, callback, generation);
             return;
+        } else if (forcedLang != null) {
+            Log.d(TAG, "Bahasa TIDAK dipaksa meski skrip=" + forcedLang
+                    + " (ocrScript=" + ocrScript + ", ocrScore=" + ocrScore
+                    + " < ambang " + requiredScore
+                    + "), turun ke LanguageIdentifier");
         }
 
         LanguageIdentificationOptions options = new LanguageIdentificationOptions.Builder()
@@ -1438,10 +1620,24 @@ public final class OcrTranslateHelper {
                     Log.d(TAG, "Bahasa terdeteksi (gabungan): " + languageCode);
 
                     String sanitized = sanitizeDetectedLanguage(combinedText, languageCode);
+                    // PERBAIKAN BUG: sanitizeDetectedLanguage() mengembalikan null
+                    // untuk DUA alasan berbeda — (a) kode tidak dikenal/tidak
+                    // didukung ML Kit Translate sama sekali, atau (b) kode
+                    // "unreliable" (mis. ha, ceb, sw) dengan sinyal Latin yang
+                    // terlalu lemah (<6 huruf) untuk dipercaya sebagai Inggris.
+                    // Versi lama HANYA jatuh ke fallback bila kondisi tambahan
+                    // isUnreliableLatinGuess(languageCode) juga true — tapi
+                    // languageCode di titik itu adalah kode MENTAH sebelum
+                    // dinormalisasi, jadi kode yang tidak dikenal sama sekali
+                    // (bukan salah satu string di daftar isUnreliableLatinGuess)
+                    // lolos begitu saja dan dipakai apa adanya untuk translate.
+                    // Sekarang: null dari sanitasi SELALU berarti "jangan pakai
+                    // kode ini apa adanya" → selalu turun ke fallback.
                     if (sanitized != null) {
                         languageCode = sanitized;
                         Log.d(TAG, "Bahasa setelah sanitasi: " + languageCode);
-                    } else if ("und".equals(languageCode) || isUnreliableLatinGuess(languageCode)) {
+                    } else {
+                        Log.d(TAG, "Bahasa '" + languageCode + "' ditolak sanitasi, coba fallback");
                         detectLanguageFromLongestBlockFallback(sortedForDetect, textBlocks, callback, generation);
                         return;
                     }
@@ -1590,23 +1786,32 @@ public final class OcrTranslateHelper {
     private static void finishLanguageDetected(
             String languageCode, List<Text.TextBlock> allBlocks,
             ResultCallback callback, long generation, String sampleText) {
+        // PERBAIKAN BUG: null dari sanitizeDetectedLanguage() SELALU berarti
+        // "tolak", baik karena kode ada di daftar isUnreliableLatinGuess()
+        // maupun karena kode itu sama sekali tidak dikenal oleh
+        // normalizeLanguageCode()/isSupportedTranslateLanguage(). Versi lama
+        // hanya menolak saat isUnreliableLatinGuess(languageCode) juga true,
+        // sehingga kode tak-dikenal lain bisa lolos memakai languageCode
+        // mentah tanpa tersanitasi.
         if (sampleText != null && !sampleText.isEmpty()) {
             String sanitized = sanitizeDetectedLanguage(sampleText, languageCode);
-            if (sanitized != null) languageCode = sanitized;
-            else if (isUnreliableLatinGuess(languageCode)) {
+            if (sanitized != null) {
+                languageCode = sanitized;
+            } else {
                 Log.d(TAG, "Tolak deteksi tidak andal: " + languageCode);
                 callback.onSuccess(toUntranslatedBlocks(allBlocks));
                 return;
             }
-        } else if (isUnreliableLatinGuess(languageCode)) {
+        } else {
             // Tanpa sample: coba skrip dari semua blok
             StringBuilder sb = new StringBuilder();
             for (Text.TextBlock b : allBlocks) {
                 if (b != null && b.getText() != null) sb.append(b.getText()).append("\n");
             }
             String sanitized = sanitizeDetectedLanguage(sb.toString(), languageCode);
-            if (sanitized != null) languageCode = sanitized;
-            else {
+            if (sanitized != null) {
+                languageCode = sanitized;
+            } else {
                 Log.d(TAG, "Tolak deteksi tidak andal: " + languageCode);
                 callback.onSuccess(toUntranslatedBlocks(allBlocks));
                 return;

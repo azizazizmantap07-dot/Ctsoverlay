@@ -10,8 +10,8 @@ android {
         applicationId "com.israfilx.circlesearch"
         minSdk 26
         targetSdk 34
-        versionCode 39
-        versionName "1.9.18"
+        versionCode 40
+        versionName "1.9.19"
     }
 
     // Dibaca dari properti -P yang diinjeksikan workflow build-release.yml
