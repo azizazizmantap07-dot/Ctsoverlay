@@ -491,11 +491,11 @@ public final class OcrTranslateHelper {
     }
 
     /**
-     * ara.traineddata "best" ~12MB (jauh lebih akurat dari "fast" ~1MB).
-     * tha.traineddata "fast" sudah cukup baik dan lebih ringan.
+     * ara.traineddata "best" ~12MB, tha.traineddata "best" ~7–10MB.
+     * Keduanya jauh lebih akurat dari varian "fast".
      */
     private static final long MIN_ARA_TRAINEDDATA_BYTES = 3_000_000L; // bedakan fast vs best
-    private static final long MIN_THA_TRAINEDDATA_BYTES = 50_000L;
+    private static final long MIN_THA_TRAINEDDATA_BYTES = 2_000_000L; // fast ~1MB, best lebih besar
 
     private static boolean isTessdataReady(Context context) {
         File dir = getTessdataDir(context);
@@ -516,21 +516,26 @@ public final class OcrTranslateHelper {
                 File ara = new File(dir, "ara.traineddata");
                 File tha = new File(dir, "tha.traineddata");
 
-                // Upgrade: hapus ara "fast" lama yang terlalu kecil/akurasi buruk
+                // Upgrade: hapus model "fast" lama yang terlalu kecil/akurasi buruk
                 if (ara.exists() && ara.length() < MIN_ARA_TRAINEDDATA_BYTES) {
                     Log.d(TAG, "Mengganti ara.traineddata fast (" + ara.length()
                             + " byte) dengan versi best…");
                     //noinspection ResultOfMethodCallIgnored
                     ara.delete();
                 }
+                if (tha.exists() && tha.length() < MIN_THA_TRAINEDDATA_BYTES) {
+                    Log.d(TAG, "Mengganti tha.traineddata fast (" + tha.length()
+                            + " byte) dengan versi best…");
+                    //noinspection ResultOfMethodCallIgnored
+                    tha.delete();
+                }
 
-                // Arabic: tessdata_best (akurasi jauh lebih baik)
+                // Arab + Thai: tessdata_best
                 String bestBase = "https://github.com/tesseract-ocr/tessdata_best/raw/main/";
-                String fastBase = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/";
                 downloadFile(bestBase + "ara.traineddata", ara, callback,
                         "Arabic OCR (best, ~12MB)", MIN_ARA_TRAINEDDATA_BYTES);
-                downloadFile(fastBase + "tha.traineddata", tha, callback,
-                        "Thai OCR", MIN_THA_TRAINEDDATA_BYTES);
+                downloadFile(bestBase + "tha.traineddata", tha, callback,
+                        "Thai OCR (best, ~7MB)", MIN_THA_TRAINEDDATA_BYTES);
 
                 if (isTessdataReady(context)) {
                     callback.onSuccess();
@@ -685,20 +690,44 @@ public final class OcrTranslateHelper {
         } else if (src.getWidth() < 1200) {
             scale = 1.5f;
         }
-        Bitmap b = src;
+        Bitmap scaled = src;
+        boolean scaledOwned = false;
         if (scale > 1.05f) {
             int w = Math.round(src.getWidth() * scale);
             int h = Math.round(src.getHeight() * scale);
-            b = Bitmap.createScaledBitmap(src, w, h, true);
+            scaled = Bitmap.createScaledBitmap(src, w, h, true);
+            scaledOwned = true;
         }
-        if (b.getConfig() != Bitmap.Config.ARGB_8888) {
-            Bitmap converted = b.copy(Bitmap.Config.ARGB_8888, true);
-            if (b != src && !b.isRecycled()) {
-                try { b.recycle(); } catch (Exception ignored) {}
-            }
-            b = converted;
+        // Grayscale + contrast stretch: sangat membantu OCR Arab/Thai di screenshot
+        int w = scaled.getWidth();
+        int h = scaled.getHeight();
+        int[] pixels = new int[w * h];
+        scaled.getPixels(pixels, 0, w, 0, 0, w, h);
+        int minG = 255, maxG = 0;
+        for (int i = 0; i < pixels.length; i++) {
+            int p = pixels[i];
+            int g = ((p >> 16) & 0xFF) * 30 + ((p >> 8) & 0xFF) * 59 + (p & 0xFF) * 11;
+            g /= 100;
+            pixels[i] = g; // sementara simpan gray di channel
+            if (g < minG) minG = g;
+            if (g > maxG) maxG = g;
         }
-        return b;
+        int range = Math.max(1, maxG - minG);
+        for (int i = 0; i < pixels.length; i++) {
+            int g = pixels[i];
+            // stretch + sedikit boost kontras
+            int v = (g - minG) * 255 / range;
+            // threshold lembut: dorong ke hitam/putih agar stroke huruf lebih tajam
+            if (v < 90) v = Math.max(0, v - 30);
+            else if (v > 165) v = Math.min(255, v + 30);
+            pixels[i] = 0xFF000000 | (v << 16) | (v << 8) | v;
+        }
+        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        out.setPixels(pixels, 0, w, 0, 0, w, h);
+        if (scaledOwned && scaled != src && !scaled.isRecycled()) {
+            try { scaled.recycle(); } catch (Exception ignored) {}
+        }
+        return out;
     }
 
     /**
@@ -724,8 +753,13 @@ public final class OcrTranslateHelper {
                 Log.w(TAG, "TessBaseAPI.init gagal untuk " + lang);
                 return null;
             }
-            // PSM_AUTO bagus untuk potongan seleksi; untuk Arab RTL LSTM tetap jalan
-            tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO);
+            // Arab: SINGLE_BLOCK sering lebih stabil untuk paragraf;
+            // Thai/campuran: AUTO
+            if (lang != null && lang.startsWith("ara")) {
+                tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK);
+            } else {
+                tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO);
+            }
             // Pertahankan spasi antar kata (penting untuk Arab)
             try {
                 tess.setVariable("preserve_interword_spaces", "1");
