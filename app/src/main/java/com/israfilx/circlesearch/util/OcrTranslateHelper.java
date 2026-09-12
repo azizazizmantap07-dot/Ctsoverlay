@@ -545,24 +545,96 @@ public final class OcrTranslateHelper {
         Bitmap work = prepareBitmapForTesseract(bitmap);
         List<TranslatedBlock> best = null;
         int bestScore = -1;
+        String bestLang = null;
 
-        String[] langs = new String[] { "tha", "ara", "ara+tha" };
+        // WAJIB coba SEMUA bahasa — jangan break lebih awal.
+        // Bug sebelumnya: tha dicoba dulu, jika skor > 30 langsung stop,
+        // sehingga teks Arab tidak pernah memakai model ara → hasil kacau.
+        String[] langs = new String[] { "ara", "tha", "ara+tha" };
         for (String lang : langs) {
             List<TranslatedBlock> result = runTesseractWithLang(context, work, lang);
-            int sc = scoreTranslatedBlocks(result);
+            if (result == null || result.isEmpty()) {
+                Log.d(TAG, "Tesseract lang=" + lang + " skor=0 (kosong)");
+                continue;
+            }
+            int sc = scoreTranslatedBlocksForLang(result, lang);
+            String sample = sampleText(result, 60);
             Log.d(TAG, "Tesseract lang=" + lang + " skor=" + sc
-                    + " hasScript=" + containsArabicOrThai(result));
-            if (result != null && sc > bestScore) {
+                    + " hasScript=" + containsArabicOrThai(result)
+                    + " sample=[" + sample + "]");
+            if (sc > bestScore) {
                 bestScore = sc;
                 best = result;
+                bestLang = lang;
             }
-            if (containsArabicOrThai(result) && sc > 30) break;
         }
+        Log.d(TAG, "Tesseract terbaik: lang=" + bestLang + " skor=" + bestScore);
 
         if (work != bitmap && work != null && !work.isRecycled()) {
             try { work.recycle(); } catch (Exception ignored) {}
         }
         return best;
+    }
+
+    /** Cuplikan teks untuk log (max n karakter). */
+    private static String sampleText(List<TranslatedBlock> blocks, int maxLen) {
+        if (blocks == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (TranslatedBlock b : blocks) {
+            if (b == null || b.originalText == null) continue;
+            if (sb.length() > 0) sb.append(" | ");
+            sb.append(b.originalText.trim());
+            if (sb.length() >= maxLen) break;
+        }
+        String s = sb.toString();
+        return s.length() > maxLen ? s.substring(0, maxLen) + "…" : s;
+    }
+
+    /**
+     * Skor disesuaikan bahasa model yang dipakai.
+     * Model ara harus diunggulkan jika banyak karakter Arab;
+     * model tha diunggulkan jika banyak karakter Thai.
+     * Ini mencegah model tha "menang" saat membaca teks Arab.
+     */
+    private static int scoreTranslatedBlocksForLang(List<TranslatedBlock> blocks, String lang) {
+        if (blocks == null) return 0;
+        int arab = 0, thai = 0, other = 0;
+        for (TranslatedBlock b : blocks) {
+            if (b == null || b.originalText == null) continue;
+            String t = b.originalText;
+            for (int i = 0; i < t.length(); i++) {
+                char c = t.charAt(i);
+                if (Character.isWhitespace(c)) continue;
+                if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
+                        || (c >= 0xFB50 && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF)) {
+                    arab++;
+                } else if (c >= 0x0E00 && c <= 0x0E7F) {
+                    thai++;
+                } else if (Character.isLetterOrDigit(c)) {
+                    other++;
+                }
+            }
+        }
+        int scriptChars = arab + thai;
+        if (scriptChars == 0 && other == 0) return 0;
+
+        int score;
+        if ("ara".equals(lang)) {
+            // Model Arab: karakter Arab sangat berharga, Thai hampir tidak
+            score = arab * 8 + thai * 1 + other * 1;
+        } else if ("tha".equals(lang)) {
+            score = thai * 8 + arab * 1 + other * 1;
+        } else {
+            // ara+tha: kedua skrip dihargai
+            score = arab * 5 + thai * 5 + other * 1;
+        }
+        // Bonus jika dominan skrip sesuai model
+        if ("ara".equals(lang) && arab > thai * 2 && arab >= 3) score += 50;
+        if ("tha".equals(lang) && thai > arab * 2 && thai >= 3) score += 50;
+        // Penalti kuat jika model salah skrip (mis. tha menghasilkan banyak Arab palsu, atau sebaliknya)
+        if ("ara".equals(lang) && thai > arab) score = score / 4;
+        if ("tha".equals(lang) && arab > thai) score = score / 4;
+        return score;
     }
 
     private static Bitmap prepareBitmapForTesseract(Bitmap src) {
