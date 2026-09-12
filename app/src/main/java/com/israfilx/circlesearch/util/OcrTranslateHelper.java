@@ -262,11 +262,34 @@ public final class OcrTranslateHelper {
         public final String originalText;
         public final String translatedText;
         public final Rect boundingBox;
+        /**
+         * PERBAIKAN — confidence asli OCR per baris/blok, dalam skala 0-100
+         * (langsung dari {@code TessBaseAPI.confidence()} untuk hasil
+         * Tesseract). -1 berarti tidak diketahui/tidak berlaku (mis. hasil
+         * ML Kit, yang tidak mengekspos confidence per baris dengan cara
+         * yang sama).
+         *
+         * Ini SINYAL YANG SUDAH ADA dari Tesseract tapi sebelumnya dibaca
+         * lalu dibuang setelah filter per-baris — hasil scoring akhir
+         * (scoreTranslatedBlocksForLang) hanya melihat PANJANG teks, buta
+         * terhadap seberapa yakin Tesseract terhadap teks itu. Akibatnya,
+         * halusinasi model LSTM (yang menghasilkan kata "valid" secara
+         * struktur tapi dengan confidence rendah) tidak bisa dibedakan dari
+         * bacaan asli yang confidence-nya tinggi — hanya lewat panjang teks.
+         * Field ini mengalirkan sinyal itu ke keputusan akhir alih-alih
+         * terus menambah aturan denylist manual untuk tiap kasus baru.
+         */
+        public final float ocrConfidence;
 
         public TranslatedBlock(String originalText, String translatedText, Rect boundingBox) {
+            this(originalText, translatedText, boundingBox, -1f);
+        }
+
+        public TranslatedBlock(String originalText, String translatedText, Rect boundingBox, float ocrConfidence) {
             this.originalText = originalText;
             this.translatedText = translatedText;
             this.boundingBox = boundingBox;
+            this.ocrConfidence = ocrConfidence;
         }
 
         public boolean wasTranslated() {
@@ -518,7 +541,25 @@ public final class OcrTranslateHelper {
                 // saja memang bagian sah dari kalimat/percakapan lebih panjang.
                 boolean isHallucination = (tessBlocks != null && tessBlocks.size() <= 1)
                         && isKnownTessHallucination(tessBlocks);
-                boolean realArabThai = arabThaiChars >= minArabThaiChars && hasRealWord && !isHallucination;
+                // PERBAIKAN STRUKTURAL — gerbang confidence eksplisit,
+                // menggantikan pendekatan "tambal tiap frasa halusinasi
+                // baru satu per satu" yang tidak pernah benar-benar selesai.
+                //
+                // avgTessConfidence dihitung dari TessBaseAPI.confidence()
+                // ASLI per baris (sinyal yang sudah dihasilkan Tesseract,
+                // sebelumnya dibuang setelah filter garis — lihat javadoc
+                // TranslatedBlock.ocrConfidence). Untuk kasus blok tunggal
+                // (paling rawan halusinasi), disyaratkan confidence rata-rata
+                // di atas ambang SOFT (28) — level yang sama dipakai untuk
+                // memutuskan apakah sebuah baris "cukup yakin" di filter awal.
+                // Ini general: menekan SEMUA halusinasi rendah-confidence,
+                // dikenal atau belum, bukan hanya frasa yang sudah didaftar.
+                float avgTessConfidence = averageConfidence(tessBlocks);
+                boolean confidentEnough = (tessBlocks == null || tessBlocks.size() > 1)
+                        || avgTessConfidence < 0f // tidak diketahui (jalur lama) -> jangan blokir
+                        || avgTessConfidence >= MIN_TESS_LINE_CONFIDENCE_SOFT;
+                boolean realArabThai = arabThaiChars >= minArabThaiChars && hasRealWord
+                        && !isHallucination && confidentEnough;
 
                 if (tessBlocks != null && !tessBlocks.isEmpty() && realArabThai) {
                     if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0
@@ -542,6 +583,8 @@ public final class OcrTranslateHelper {
                         + " minRequired=" + minArabThaiChars
                         + " hasRealWord=" + hasRealWord
                         + " isHallucination=" + isHallucination
+                        + " avgTessConfidence=" + avgTessConfidence
+                        + " confidentEnough=" + confidentEnough
                         + " mlKit=" + mlKitScript + "/" + mlKitScore);
 
                 if (preferTess) {
@@ -591,6 +634,26 @@ public final class OcrTranslateHelper {
                 Log.d(TAG, "Tessdata: " + message);
             }
         });
+    }
+
+    /**
+     * Rata-rata {@link TranslatedBlock#ocrConfidence} dari blok yang punya
+     * nilai valid (>= 0). Mengembalikan -1 bila tidak ada satupun blok yang
+     * punya confidence tercatat (mis. hasil dari jalur ML Kit, atau versi
+     * lama sebelum field ini ada) — pemanggil HARUS menganggap -1 sebagai
+     * "tidak diketahui", bukan "confidence nol/buruk".
+     */
+    private static float averageConfidence(List<TranslatedBlock> blocks) {
+        if (blocks == null) return -1f;
+        double sum = 0;
+        int count = 0;
+        for (TranslatedBlock b : blocks) {
+            if (b != null && b.ocrConfidence >= 0f) {
+                sum += b.ocrConfidence;
+                count++;
+            }
+        }
+        return count > 0 ? (float) (sum / count) : -1f;
     }
 
     private static boolean containsArabicOrThai(List<TranslatedBlock> blocks) {
@@ -659,7 +722,18 @@ public final class OcrTranslateHelper {
      * tak berhubungan), tambahkan akar frasanya ke sini.
      */
     private static final String[] KNOWN_TESS_HALLUCINATION_ROOTS = new String[] {
-            "สวัสดิ",       // "selamat" (pagi/siang/sore) — root umum halusinasi
+            // PERBAIKAN — dipendekkan dari "สวัสดิ" ke "สวัสด" (buang 1
+            // karakter vokal penutup). Log lapangan menunjukkan Tesseract
+            // berhalusinasi frasa yang SAMA dengan ejaan vokal akhir yang
+            // BERBEDA-BEDA antar kejadian ("สวัสดิ" dengan sara-i pendek
+            // U+0E34 pada satu screenshot, "สวัสดี" dengan sara-i panjang
+            // U+0E35 pada screenshot lain) — variasi ini wajar karena LSTM
+            // Tesseract menghasilkan vokal akhir yang sedikit berbeda tiap
+            // kali "menormalkan" noise yang berbeda ke frasa umum yang
+            // sama. Root "สวัสด" (5 konsonan sebelum vokal yang bervariasi)
+            // menangkap kedua varian tanpa perlu mendaftar tiap kombinasi
+            // vokal satu per satu.
+            "สวัสด",        // "selamat" (pagi/siang/sore/malam) — root umum halusinasi
             "คุณสบายดีไหม", // "apa kabar"
     };
 
@@ -798,6 +872,31 @@ public final class OcrTranslateHelper {
     }
 
     /**
+     * Folder backup Tesseract — sengaja BUKAN di {@link Context#getFilesDir()}
+     * (yang ikut terhapus saat uninstall/clear-data, dan itulah masalah yang
+     * fitur ini pecahkan) melainkan di penyimpanan eksternal app-scoped
+     * ({@link Context#getExternalFilesDir}). Folder ini:
+     *  - TIDAK butuh permission storage (app-scoped sejak Android 4.4+),
+     *  - bertahan lewat uninstall biasa pada banyak versi Android/vendor
+     *    (walau TIDAK dijamin 100% oleh seluruh OEM — beberapa custom ROM
+     *    ikut membersihkan folder ini juga; ini best-effort, bukan garansi),
+     *  - bisa diakses lewat `adb pull`/`adb push` tanpa root untuk backup
+     *    manual di luar app bila diperlukan saat debug.
+     */
+    private static File getTessdataBackupDir(Context context) {
+        File base = context.getExternalFilesDir(null);
+        if (base == null) {
+            // Penyimpanan eksternal tidak tersedia (mis. dicabut) — fallback
+            // ke internal; lebih baik backup gagal-tapi-jelas daripada
+            // NullPointerException di tengah proses.
+            base = context.getFilesDir();
+        }
+        File dir = new File(base, "tessdata_backup");
+        if (!dir.exists()) dir.mkdirs();
+        return dir;
+    }
+
+    /**
      * ara.traineddata "best" ~12MB, tha.traineddata "best" ~7–10MB.
      * Keduanya jauh lebih akurat dari varian "fast".
      */
@@ -812,9 +911,117 @@ public final class OcrTranslateHelper {
                 && tha.exists() && tha.length() >= MIN_THA_TRAINEDDATA_BYTES;
     }
 
+    /**
+     * True bila backup lokal (di {@link #getTessdataBackupDir}) lengkap dan
+     * valid (ukuran file sudah di atas ambang "best", bukan sisa versi
+     * "fast" lama atau file korup/terpotong).
+     */
+    public static boolean isTessdataBackupAvailable(Context context) {
+        File dir = getTessdataBackupDir(context);
+        File ara = new File(dir, "ara.traineddata");
+        File tha = new File(dir, "tha.traineddata");
+        return ara.exists() && ara.length() >= MIN_ARA_TRAINEDDATA_BYTES
+                && tha.exists() && tha.length() >= MIN_THA_TRAINEDDATA_BYTES;
+    }
+
+    /**
+     * Salin ara.traineddata + tha.traineddata yang SUDAH terunduh (di
+     * {@link #getTessdataDir}) ke folder backup app-scoped yang bertahan
+     * lewat uninstall/clear-data (lihat javadoc {@link #getTessdataBackupDir}).
+     *
+     * Tidak melakukan apa pun lewat jaringan — murni copy file lokal ke
+     * lokal, sehingga instan dan tidak butuh {@link ModelCallback#onProgress}
+     * yang berarti (dipanggil sekali di awal/akhir saja untuk konsistensi
+     * antarmuka dengan fungsi model lain).
+     */
+    public static void backupTessdata(Context context, ModelCallback callback) {
+        new Thread(() -> {
+            try {
+                if (!isTessdataReady(context)) {
+                    callback.onFailure(new Exception(
+                            "Model Arab/Thai belum diunduh di app ini — tidak ada yang bisa di-backup"));
+                    return;
+                }
+                callback.onProgress("Menyalin model Arab/Thai ke folder backup…");
+                File src = getTessdataDir(context);
+                File dst = getTessdataBackupDir(context);
+                copyFile(new File(src, "ara.traineddata"), new File(dst, "ara.traineddata"));
+                copyFile(new File(src, "tha.traineddata"), new File(dst, "tha.traineddata"));
+                if (isTessdataBackupAvailable(context)) {
+                    Log.d(TAG, "Backup tessdata berhasil ke " + dst.getAbsolutePath());
+                    callback.onSuccess();
+                } else {
+                    callback.onFailure(new Exception("Backup selesai tapi file hasil tidak valid"));
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Gagal backup tessdata", e);
+                callback.onFailure(e);
+            }
+        }).start();
+    }
+
+    /**
+     * Salin balik ara.traineddata + tha.traineddata dari folder backup ke
+     * lokasi aktif ({@link #getTessdataDir}) — dipakai supaya setelah
+     * reinstall/clear-data untuk keperluan debug, Tesseract langsung siap
+     * pakai tanpa mengunduh ulang ~19MB dari GitHub.
+     */
+    public static void restoreTessdata(Context context, ModelCallback callback) {
+        new Thread(() -> {
+            try {
+                if (!isTessdataBackupAvailable(context)) {
+                    callback.onFailure(new Exception(
+                            "Tidak ada backup yang valid — lakukan backup dulu selagi model sudah terunduh"));
+                    return;
+                }
+                callback.onProgress("Memulihkan model Arab/Thai dari backup…");
+                File src = getTessdataBackupDir(context);
+                File dst = getTessdataDir(context);
+                copyFile(new File(src, "ara.traineddata"), new File(dst, "ara.traineddata"));
+                copyFile(new File(src, "tha.traineddata"), new File(dst, "tha.traineddata"));
+                if (isTessdataReady(context)) {
+                    Log.d(TAG, "Restore tessdata berhasil dari " + src.getAbsolutePath());
+                    callback.onSuccess();
+                } else {
+                    callback.onFailure(new Exception("Restore selesai tapi file hasil tidak valid"));
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Gagal restore tessdata", e);
+                callback.onFailure(e);
+            }
+        }).start();
+    }
+
+    /** Copy file sederhana, buffer 8KB, menimpa tujuan bila sudah ada. */
+    private static void copyFile(File src, File dst) throws Exception {
+        if (!src.exists()) {
+            throw new Exception("Sumber tidak ditemukan: " + src.getName());
+        }
+        try (InputStream in = new BufferedInputStream(new java.io.FileInputStream(src));
+             FileOutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                out.write(buf, 0, n);
+            }
+            out.flush();
+        }
+    }
+
     public static void ensureTessdata(Context context, ModelCallback callback) {
         if (isTessdataReady(context)) {
             callback.onSuccess();
+            return;
+        }
+        // PERBAIKAN — sebelum mengunduh dari GitHub (~19MB, butuh internet),
+        // cek dulu apakah ada backup lokal valid dari instalasi sebelumnya
+        // (lihat backupTessdata/restoreTessdata). Skenario utama: developer
+        // clear-data/reinstall berulang saat debug — tanpa ini, setiap kali
+        // harus menunggu unduhan ulang penuh walau modelnya sebenarnya masih
+        // ada di penyimpanan eksternal app-scoped milik app ini.
+        if (isTessdataBackupAvailable(context)) {
+            Log.d(TAG, "Tessdata belum ada tapi backup lokal ditemukan, restore alih-alih unduh ulang");
+            restoreTessdata(context, callback);
             return;
         }
         new Thread(() -> {
@@ -908,7 +1115,9 @@ public final class OcrTranslateHelper {
             }
             int sc = scoreTranslatedBlocksForLang(result, lang);
             String sample = sampleText(result, 60);
+            float avgConf = averageConfidence(result);
             Log.d(TAG, "Tesseract lang=" + lang + " skor=" + sc
+                    + " avgConf=" + avgConf
                     + " hasScript=" + containsArabicOrThai(result)
                     + " sample=[" + sample + "]");
             if (sc > bestScore) {
@@ -1004,6 +1213,47 @@ public final class OcrTranslateHelper {
                 score = (int) (score * 0.15);
             } else if (noiseRatio >= 0.20) {
                 score = (int) (score * 0.5);
+            }
+        }
+
+        // PERBAIKAN STRUKTURAL — pengali berbasis confidence ASLI Tesseract
+        // (TessBaseAPI.confidence() per baris), bukan lagi hanya panjang
+        // teks / rasio noise karakter. Ini sinyal yang SUDAH DIHASILKAN
+        // Tesseract sejak awal (lihat runTesseractWithLang, dipakai untuk
+        // filter "Skip baris conf=...") tapi sebelumnya dibuang begitu
+        // saja setelah lolos filter awal.
+        //
+        // Kenapa ini penting: halusinasi LSTM Tesseract (menghasilkan kata
+        // yang valid secara struktur dari noise visual) hampir selalu
+        // punya confidence LEBIH RENDAH daripada bacaan asli yang benar,
+        // meski secara "bentuk" hasilnya sama-sama kata Thai/Arab yang sah.
+        // Pendekatan lama (menambah aturan/denylist untuk tiap frasa
+        // halusinasi yang ditemukan) tidak pernah "selesai" karena frasa
+        // halusinasi baru bisa selalu muncul; confidence adalah sinyal
+        // yang sudah general, bukan spesifik-per-kasus, sehingga menekan
+        // SEMUA halusinasi rendah-confidence sekaligus, dikenal atau tidak.
+        double confSum = 0;
+        int confCount = 0;
+        for (TranslatedBlock b : blocks) {
+            if (b != null && b.ocrConfidence >= 0f) {
+                confSum += b.ocrConfidence;
+                confCount++;
+            }
+        }
+        if (confCount > 0) {
+            double avgConf = confSum / confCount;
+            // Ambang dan faktor selaras dengan MIN_TESS_LINE_CONFIDENCE_HARD/SOFT
+            // yang sudah dipakai untuk filter per-baris — di bawah confidence
+            // "soft" (28), skor ditekan makin tajam makin rendah confidence-nya,
+            // supaya hasil yang lolos filter garis tipis tetap kalah lawan
+            // kandidat lain yang confidence-nya jauh lebih meyakinkan.
+            if (avgConf < MIN_TESS_LINE_CONFIDENCE_SOFT) {
+                // avgConf=12 (batas hard) -> faktor ~0.25; avgConf=28 (batas soft) -> faktor 1.0
+                double factor = 0.25 + 0.75 * Math.max(0.0,
+                        (avgConf - MIN_TESS_LINE_CONFIDENCE_HARD)
+                                / (MIN_TESS_LINE_CONFIDENCE_SOFT - MIN_TESS_LINE_CONFIDENCE_HARD));
+                factor = Math.max(0.25, Math.min(1.0, factor));
+                score = (int) (score * factor);
             }
         }
         return score;
@@ -1149,10 +1399,10 @@ public final class OcrTranslateHelper {
                         if (isMostlyGarbageLine(text)) continue;
                         Rect rect = it.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                         if (rect != null && rect.width() > 2 && rect.height() > 2) {
-                            blocks.add(new TranslatedBlock(text, text, new Rect(rect)));
+                            blocks.add(new TranslatedBlock(text, text, new Rect(rect), conf));
                         } else {
                             blocks.add(new TranslatedBlock(text, text,
-                                    new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight())));
+                                    new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight()), conf));
                         }
                     } while (it.next(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE));
                 } finally {
@@ -1163,8 +1413,12 @@ public final class OcrTranslateHelper {
             if (blocks.isEmpty() && !fullText.trim().isEmpty()) {
                 String cleaned = fullText.trim();
                 if (!isMostlyGarbageLine(cleaned)) {
+                    float meanConf = -1f;
+                    try {
+                        meanConf = tess.meanConfidence();
+                    } catch (Throwable ignored) {}
                     blocks.add(new TranslatedBlock(cleaned, cleaned,
-                            new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight())));
+                            new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight()), meanConf));
                 }
             }
             return blocks.isEmpty() ? null : blocks;
@@ -1630,7 +1884,7 @@ public final class OcrTranslateHelper {
                     TranslatedBlock b = blocks.get(i);
                     translator.translate(b.originalText)
                             .addOnSuccessListener(translated -> {
-                                results[idx] = new TranslatedBlock(b.originalText, translated, b.boundingBox);
+                                results[idx] = new TranslatedBlock(b.originalText, translated, b.boundingBox, b.ocrConfidence);
                                 if (remaining.decrementAndGet() == 0) {
                                     translator.close();
                                     if (isCurrent(generation)) {
@@ -2156,6 +2410,113 @@ public final class OcrTranslateHelper {
     // Manajemen model bahasa (manual download / cek status / hapus)
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // PERBAIKAN — pencatatan "daftar bahasa yang pernah diunduh", dipakai
+    // untuk fitur restore ML Kit. Model Translate ML Kit disimpan di
+    // storage PRIVAT milik Google Play Services (bukan folder app ini),
+    // sehingga TIDAK BISA di-backup/restore sebagai file langsung dari
+    // dalam app biasa (tanpa root). Yang REALISTIS dilakukan: simpan daftar
+    // kode bahasa yang pernah berhasil diunduh ke SharedPreferences (yang
+    // ukurannya kecil dan ikut tertangkap adb backup bila allowBackup=true),
+    // lalu saat restore, tawarkan re-download otomatis HANYA untuk bahasa
+    // yang ada di daftar itu — developer tidak perlu ingat-ingat manual
+    // bahasa apa saja yang tadinya sudah diunduh sebelum clear-data/uninstall.
+    // -------------------------------------------------------------------------
+
+    private static final String PREFS_NAME = "ocr_translate_prefs";
+    private static final String PREF_KEY_DOWNLOADED_HISTORY = "downloaded_language_history";
+
+    /** Tambahkan kode bahasa ke riwayat unduhan (dipanggil setiap unduhan sukses). */
+    private static void recordLanguageDownloaded(Context context, String languageCode) {
+        if (context == null || languageCode == null) return;
+        try {
+            android.content.SharedPreferences prefs =
+                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            Set<String> history = new HashSet<>(
+                    prefs.getStringSet(PREF_KEY_DOWNLOADED_HISTORY, Collections.emptySet()));
+            if (history.add(languageCode)) {
+                prefs.edit().putStringSet(PREF_KEY_DOWNLOADED_HISTORY, history).apply();
+            }
+        } catch (Exception e) {
+            // Non-fatal — riwayat hanya kenyamanan restore, bukan jalur kritikal.
+            Log.w(TAG, "Gagal mencatat riwayat unduhan bahasa: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Ambil daftar kode bahasa yang PERNAH berhasil diunduh di perangkat ini
+     * (riwayat SharedPreferences), TERLEPAS dari apakah modelnya saat ini
+     * masih benar-benar ada di Play Services atau tidak (itulah gunanya —
+     * daftar ini dipakai justru ketika model sudah hilang, mis. setelah
+     * clear-data, dan restore perlu tahu apa yang harus diunduh ulang).
+     */
+    public static List<String> getDownloadHistory(Context context) {
+        if (context == null) return Collections.emptyList();
+        try {
+            android.content.SharedPreferences prefs =
+                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            return new ArrayList<>(prefs.getStringSet(PREF_KEY_DOWNLOADED_HISTORY, Collections.emptySet()));
+        } catch (Exception e) {
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Unduh ulang seluruh bahasa yang tercatat di {@link #getDownloadHistory}
+     * tapi SAAT INI belum ada di Play Services (mis. setelah clear-data).
+     * Dipakai tombol "Restore bahasa dari riwayat" di menu bahasa.
+     *
+     * Beda dengan {@link #downloadAllModels}: ini hanya mengunduh bahasa
+     * yang MEMANG pernah dipakai user, bukan seluruh 38 bahasa yang
+     * didukung — jauh lebih hemat kuota/waktu untuk skenario debug.
+     */
+    public static void restoreLanguagesFromHistory(Context context, ModelCallback callback) {
+        List<String> history = getDownloadHistory(context);
+        if (history.isEmpty()) {
+            callback.onFailure(new Exception(
+                    "Belum ada riwayat bahasa yang pernah diunduh di perangkat ini"));
+            return;
+        }
+        restoreHistoryNext(context, history, 0, callback);
+    }
+
+    private static void restoreHistoryNext(
+            Context context, List<String> history, int index, ModelCallback callback) {
+        if (index >= history.size()) {
+            callback.onSuccess();
+            return;
+        }
+        String code = history.get(index);
+        callback.onProgress("Memulihkan " + code + " (" + (index + 1) + "/" + history.size() + ")…");
+        isModelDownloaded(code, new ModelCallback() {
+            @Override
+            public void onSuccess() {
+                // Sudah ada (mis. baru saja diunduh manual), lanjut berikutnya
+                restoreHistoryNext(context, history, index + 1, callback);
+            }
+            @Override
+            public void onFailure(Exception e) {
+                downloadModel(context, code, new ModelCallback() {
+                    @Override
+                    public void onSuccess() {
+                        restoreHistoryNext(context, history, index + 1, callback);
+                    }
+                    @Override
+                    public void onFailure(Exception e2) {
+                        Log.e(TAG, "Gagal restore model " + code, e2);
+                        // Lanjut ke bahasa berikutnya meski satu gagal —
+                        // sama seperti downloadAllModels, jangan berhenti total.
+                        restoreHistoryNext(context, history, index + 1, callback);
+                    }
+                    @Override
+                    public void onProgress(String message) {
+                        callback.onProgress(message);
+                    }
+                });
+            }
+        });
+    }
+
     /**
      * Cek apakah model untuk bahasa tertentu sudah diunduh.
      * Target (Indonesia) juga dicek — keduanya diperlukan.
@@ -2184,8 +2545,25 @@ public final class OcrTranslateHelper {
     /**
      * Unduh model untuk satu bahasa sumber + model target (Indonesia)
      * jika belum tersedia.
+     *
+     * @deprecated tanpa Context, riwayat unduhan tidak tercatat sehingga
+     * fitur restore ({@link #restoreLanguagesFromHistory}) tidak akan tahu
+     * bahasa ini pernah diunduh. Pakai {@link #downloadModel(Context, String, ModelCallback)}
+     * bila memungkinkan. Overload ini dipertahankan agar caller lama tidak
+     * perlu diubah paksa.
      */
+    @Deprecated
     public static void downloadModel(String languageCode, ModelCallback callback) {
+        downloadModel(null, languageCode, callback);
+    }
+
+    /**
+     * Sama seperti {@link #downloadModel(String, ModelCallback)}, tapi juga
+     * mencatat riwayat unduhan (bila {@code context} tidak null) supaya
+     * bahasa ini bisa dipulihkan otomatis lewat
+     * {@link #restoreLanguagesFromHistory} setelah clear-data/reinstall.
+     */
+    public static void downloadModel(Context context, String languageCode, ModelCallback callback) {
         RemoteModelManager manager = RemoteModelManager.getInstance();
         DownloadConditions conditions = new DownloadConditions.Builder().build();
 
@@ -2199,7 +2577,11 @@ public final class OcrTranslateHelper {
                 .addOnSuccessListener(unused -> {
                     callback.onProgress("Mengunduh model target (Indonesia)…");
                     manager.download(targetModel, conditions)
-                            .addOnSuccessListener(u2 -> callback.onSuccess())
+                            .addOnSuccessListener(u2 -> {
+                                recordLanguageDownloaded(context, languageCode);
+                                recordLanguageDownloaded(context, TARGET_LANGUAGE);
+                                callback.onSuccess();
+                            })
                             .addOnFailureListener(callback::onFailure);
                 })
                 .addOnFailureListener(callback::onFailure);
@@ -2208,16 +2590,25 @@ public final class OcrTranslateHelper {
     /**
      * Unduh SEMUA bahasa yang didukung secara berurutan.
      * Progress dilaporkan lewat {@link ModelCallback#onProgress}.
+     *
+     * @deprecated tanpa Context, riwayat unduhan tidak tercatat. Pakai
+     * {@link #downloadAllModels(Context, ModelCallback)} bila memungkinkan.
      */
+    @Deprecated
     public static void downloadAllModels(ModelCallback callback) {
-        List<LanguageInfo> list = SUPPORTED_SOURCE_LANGUAGES;
-        downloadNext(list, 0, callback);
+        downloadAllModels(null, callback);
     }
 
-    private static void downloadNext(List<LanguageInfo> list, int index, ModelCallback callback) {
+    /** Sama seperti {@link #downloadAllModels(ModelCallback)}, tapi mencatat riwayat unduhan. */
+    public static void downloadAllModels(Context context, ModelCallback callback) {
+        List<LanguageInfo> list = SUPPORTED_SOURCE_LANGUAGES;
+        downloadNext(context, list, 0, callback);
+    }
+
+    private static void downloadNext(Context context, List<LanguageInfo> list, int index, ModelCallback callback) {
         if (index >= list.size()) {
             // Pastikan model target juga ada
-            downloadModel(TARGET_LANGUAGE, new ModelCallback() {
+            downloadModel(context, TARGET_LANGUAGE, new ModelCallback() {
                 @Override
                 public void onSuccess() {
                     callback.onSuccess();
@@ -2238,20 +2629,20 @@ public final class OcrTranslateHelper {
             @Override
             public void onSuccess() {
                 // Sudah ada, lanjut berikutnya
-                downloadNext(list, index + 1, callback);
+                downloadNext(context, list, index + 1, callback);
             }
             @Override
             public void onFailure(Exception e) {
-                downloadModel(info.code, new ModelCallback() {
+                downloadModel(context, info.code, new ModelCallback() {
                     @Override
                     public void onSuccess() {
-                        downloadNext(list, index + 1, callback);
+                        downloadNext(context, list, index + 1, callback);
                     }
                     @Override
                     public void onFailure(Exception e2) {
                         Log.e(TAG, "Gagal unduh model " + info.code, e2);
                         // Lanjut ke bahasa berikutnya meski gagal
-                        downloadNext(list, index + 1, callback);
+                        downloadNext(context, list, index + 1, callback);
                     }
                     @Override
                     public void onProgress(String message) {
