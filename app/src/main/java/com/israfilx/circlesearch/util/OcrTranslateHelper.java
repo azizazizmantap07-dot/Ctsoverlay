@@ -371,7 +371,7 @@ public final class OcrTranslateHelper {
             callback.onSuccess(toUntranslatedBlocks(bestBlocks));
             return;
         }
-        detectLanguageAndTranslateBlocks(bestBlocks, callback, generation);
+        detectLanguageAndTranslateBlocks(bestBlocks, callback, generation, bestScript);
     }
 
     /**
@@ -449,7 +449,7 @@ public final class OcrTranslateHelper {
                     callback.onSuccess(toUntranslatedBlocks(mlKitBlocks));
                     return;
                 }
-                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation);
+                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation, mlKitScript);
             }
             @Override
             public void onFailure(Exception e) {
@@ -463,7 +463,7 @@ public final class OcrTranslateHelper {
                     callback.onSuccess(toUntranslatedBlocks(mlKitBlocks));
                     return;
                 }
-                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation);
+                detectLanguageAndTranslateBlocks(mlKitBlocks, callback, generation, mlKitScript);
             }
             @Override
             public void onProgress(String message) {
@@ -953,12 +953,18 @@ public final class OcrTranslateHelper {
         identifier.identifyLanguage(combined)
                 .addOnSuccessListener(langCode -> {
                     if (!isCurrent(generation)) return;
-                    if (langCode == null || "und".equals(langCode)) {
+                    String sanitized = sanitizeDetectedLanguage(combined, langCode);
+                    if (sanitized != null) langCode = sanitized;
+                    if (langCode == null || "und".equals(langCode) || isUnreliableLatinGuess(langCode)) {
                         identifier.identifyPossibleLanguages(combined)
                                 .addOnSuccessListener(cands -> {
                                     if (!isCurrent(generation)) return;
                                     String best = pickBestCandidate(cands);
-                                    if (best == null) {
+                                    if (best != null) {
+                                        String s2 = sanitizeDetectedLanguage(combined, best);
+                                        if (s2 != null) best = s2;
+                                    }
+                                    if (best == null || isUnreliableLatinGuess(best)) {
                                         callback.onSuccess(blocks);
                                         return;
                                     }
@@ -980,20 +986,131 @@ public final class OcrTranslateHelper {
                 });
     }
 
-    /** Deteksi th/ar dari rentang Unicode. null jika tidak jelas. */
+    /**
+     * Deteksi bahasa dari rentang Unicode.
+     * Lebih andal daripada LanguageIdentifier untuk skrip non-Latin.
+     */
     private static String detectScriptLanguage(String text) {
-        int thai = 0, arab = 0;
+        if (text == null || text.isEmpty()) return null;
+        int thai = 0, arab = 0, hangul = 0, kana = 0, cjk = 0, deva = 0;
+        int cyril = 0, greek = 0, hebrew = 0, beng = 0, tamil = 0, telugu = 0;
+        int gujarati = 0, kannada = 0, georgian = 0, latinExt = 0, latin = 0;
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
+            if (Character.isWhitespace(c) || Character.isDigit(c)) continue;
             if (c >= 0x0E00 && c <= 0x0E7F) thai++;
             else if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
                     || (c >= 0xFB50 && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF)) arab++;
+            else if ((c >= 0xAC00 && c <= 0xD7AF) || (c >= 0x1100 && c <= 0x11FF)) hangul++;
+            else if (c >= 0x3040 && c <= 0x30FF) kana++;
+            else if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
+            else if (c >= 0x0900 && c <= 0x097F) deva++;
+            else if (c >= 0x0400 && c <= 0x04FF) cyril++;
+            else if (c >= 0x0370 && c <= 0x03FF) greek++;
+            else if (c >= 0x0590 && c <= 0x05FF) hebrew++;
+            else if (c >= 0x0980 && c <= 0x09FF) beng++;
+            else if (c >= 0x0B80 && c <= 0x0BFF) tamil++;
+            else if (c >= 0x0C00 && c <= 0x0C7F) telugu++;
+            else if (c >= 0x0A80 && c <= 0x0AFF) gujarati++;
+            else if (c >= 0x0C80 && c <= 0x0CFF) kannada++;
+            else if (c >= 0x10A0 && c <= 0x10FF) georgian++;
+            else if ((c >= 0x00C0 && c <= 0x024F) || (c >= 0x1E00 && c <= 0x1EFF)) latinExt++;
+            else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) latin++;
         }
-        if (thai >= 3 && thai >= arab) return TranslateLanguage.THAI;
-        if (arab >= 3 && arab >= thai) return TranslateLanguage.ARABIC;
-        if (thai >= 1 && arab == 0) return TranslateLanguage.THAI;
-        if (arab >= 1 && thai == 0) return TranslateLanguage.ARABIC;
+
+        // Skrip non-Latin yang spesifik — prioritaskan yang paling dominan
+        int best = 0;
+        String lang = null;
+        if (thai > best) { best = thai; lang = TranslateLanguage.THAI; }
+        if (arab > best) { best = arab; lang = TranslateLanguage.ARABIC; }
+        if (hangul > best) { best = hangul; lang = TranslateLanguage.KOREAN; }
+        if (kana > best) { best = kana; lang = TranslateLanguage.JAPANESE; }
+        if (deva > best) { best = deva; lang = TranslateLanguage.HINDI; }
+        if (cyril > best) { best = cyril; lang = TranslateLanguage.RUSSIAN; }
+        if (greek > best) { best = greek; lang = TranslateLanguage.GREEK; }
+        if (hebrew > best) { best = hebrew; lang = TranslateLanguage.HEBREW; }
+        if (beng > best) { best = beng; lang = TranslateLanguage.BENGALI; }
+        if (tamil > best) { best = tamil; lang = TranslateLanguage.TAMIL; }
+        if (telugu > best) { best = telugu; lang = TranslateLanguage.TELUGU; }
+        if (gujarati > best) { best = gujarati; lang = TranslateLanguage.GUJARATI; }
+        if (kannada > best) { best = kannada; lang = TranslateLanguage.KANNADA; }
+        if (georgian > best) { best = georgian; lang = TranslateLanguage.GEORGIAN; }
+
+        // CJK: kana menang → Jepang; kalau hanya Hanzi → Cina
+        if (kana >= 2) return TranslateLanguage.JAPANESE;
+        if (cjk >= 3 && cjk >= best) return TranslateLanguage.CHINESE;
+        if (best >= 3) return lang;
+        if (best >= 1 && (latin + latinExt) < best * 2) return lang;
+        if (cjk >= 1) return TranslateLanguage.CHINESE;
         return null;
+    }
+
+    /** Map nama skrip OCR ML Kit → kode bahasa Translate. */
+    private static String languageFromOcrScript(String script) {
+        if (script == null) return null;
+        switch (script) {
+            case "Chinese": return TranslateLanguage.CHINESE;
+            case "Japanese": return TranslateLanguage.JAPANESE;
+            case "Korean": return TranslateLanguage.KOREAN;
+            case "Devanagari": return TranslateLanguage.HINDI;
+            default: return null;
+        }
+    }
+
+    /**
+     * Validasi hasil LanguageIdentifier terhadap isi teks.
+     * Menolak hasil absurd (mis. teks Cina → "ca", teks Cyrillic → "ig").
+     */
+    private static String sanitizeDetectedLanguage(String text, String detected) {
+        if (detected == null || "und".equals(detected)) return null;
+        String fromScript = detectScriptLanguage(text);
+        if (fromScript != null) {
+            // Skrip non-Latin menang mutlak atas LanguageIdentifier
+            if (!fromScript.equals(detected)) {
+                Log.d(TAG, "LanguageIdentifier='" + detected
+                        + "' ditolak, pakai skrip='" + fromScript + "'");
+            }
+            return fromScript;
+        }
+        // Latin: tolak kode bahasa yang tidak masuk akal untuk teks Latin biasa
+        // (LanguageIdentifier kadang mengembalikan ca/gl/eo/ht untuk UI campuran)
+        if (isUnreliableLatinGuess(detected)) {
+            // Default aman: Inggris jika banyak huruf Latin
+            int latinLetters = 0;
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) latinLetters++;
+            }
+            if (latinLetters >= 8) {
+                Log.d(TAG, "LanguageIdentifier='" + detected
+                        + "' tidak andal untuk teks Latin, pakai en");
+                return TranslateLanguage.ENGLISH;
+            }
+            return null; // biarkan fallback lain
+        }
+        return detected;
+    }
+
+    /** Kode yang sering salah deteksi ML Kit pada teks UI / campuran. */
+    private static boolean isUnreliableLatinGuess(String code) {
+        if (code == null) return true;
+        switch (code) {
+            case "ca": // Catalan
+            case "gl": // Galician
+            case "eo": // Esperanto
+            case "ht": // Haitian
+            case "ig": // Igbo
+            case "ga": // Irish
+            case "cy": // Welsh
+            case "sq": // Albanian
+            case "mt": // Maltese
+            case "is": // Icelandic
+            case "af": // Afrikaans (sering salah di UI pendek)
+            case "sw": // Swahili
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static void doTranslateOnTranslatedBlocks(
@@ -1073,6 +1190,12 @@ public final class OcrTranslateHelper {
 
     private static void detectLanguageAndTranslateBlocks(
             List<Text.TextBlock> textBlocks, ResultCallback callback, long generation) {
+        detectLanguageAndTranslateBlocks(textBlocks, callback, generation, null);
+    }
+
+    private static void detectLanguageAndTranslateBlocks(
+            List<Text.TextBlock> textBlocks, ResultCallback callback, long generation,
+            String ocrScript) {
         List<Text.TextBlock> significantForDetection = filterSignificantBlocks(textBlocks);
         List<Text.TextBlock> blocksForLangDetect =
                 significantForDetection.isEmpty() ? textBlocks : significantForDetection;
@@ -1104,21 +1227,43 @@ public final class OcrTranslateHelper {
             combined.append(block.getText()).append("\n");
         }
 
+        // Paksa bahasa dari aksara Unicode / skrip OCR (CJK, Hindi, Arab, Thai).
+        // LanguageIdentifier sering salah (und/ca/ig) untuk teks non-Latin.
+        String forcedLang = detectScriptLanguage(combined.toString());
+        if (forcedLang == null) {
+            forcedLang = languageFromOcrScript(ocrScript);
+        }
+        if (forcedLang != null) {
+            Log.d(TAG, "Bahasa dipaksa dari skrip/OCR: " + forcedLang
+                    + " (ocrScript=" + ocrScript + ")");
+            if (TARGET_LANGUAGE.equals(forcedLang)) {
+                callback.onSuccess(toUntranslatedBlocks(textBlocks));
+                return;
+            }
+            translateBlocksIfModelAvailable(textBlocks, forcedLang, callback, generation);
+            return;
+        }
+
         LanguageIdentificationOptions options = new LanguageIdentificationOptions.Builder()
                 .setConfidenceThreshold(LANGUAGE_CONFIDENCE_THRESHOLD)
                 .build();
         LanguageIdentifier identifier = LanguageIdentification.getClient(options);
-        identifier.identifyLanguage(combined.toString())
+        final String combinedText = combined.toString();
+        identifier.identifyLanguage(combinedText)
                 .addOnSuccessListener(languageCode -> {
                     if (!isCurrent(generation)) return;
                     Log.d(TAG, "Bahasa terdeteksi (gabungan): " + languageCode);
 
+                    String sanitized = sanitizeDetectedLanguage(combinedText, languageCode);
+                    if (sanitized != null) {
+                        languageCode = sanitized;
+                        Log.d(TAG, "Bahasa setelah sanitasi: " + languageCode);
+                    } else if ("und".equals(languageCode) || isUnreliableLatinGuess(languageCode)) {
+                        detectLanguageFromLongestBlockFallback(sortedForDetect, textBlocks, callback, generation);
+                        return;
+                    }
+
                     if ("und".equals(languageCode)) {
-                        // Fallback: gabungan gagal (campuran macam-macam
-                        // elemen UI menurunkan confidence di bawah ambang).
-                        // Coba lagi HANYA pada blok teks terpanjang sendirian
-                        // — teks tunggal yang lebih "bersih" tanpa campuran
-                        // sering kali cukup untuk lolos ambang confidence.
                         detectLanguageFromLongestBlockFallback(sortedForDetect, textBlocks, callback, generation);
                         return;
                     }
@@ -1231,9 +1376,22 @@ public final class OcrTranslateHelper {
         for (IdentifiedLanguage candidate : candidates) {
             String code = candidate.getLanguageTag();
             if ("und".equals(code)) continue;
+            if (isUnreliableLatinGuess(code)) continue;
             if (candidate.getConfidence() > bestConfidence) {
                 bestConfidence = candidate.getConfidence();
                 best = code;
+            }
+        }
+        // Jika semua kandidat "tidak andal", ambil yang tertinggi meski unreliable
+        // (akan disanitasi di finishLanguageDetected)
+        if (best == null) {
+            for (IdentifiedLanguage candidate : candidates) {
+                String code = candidate.getLanguageTag();
+                if ("und".equals(code)) continue;
+                if (candidate.getConfidence() > bestConfidence) {
+                    bestConfidence = candidate.getConfidence();
+                    best = code;
+                }
             }
         }
         return best;
@@ -1243,10 +1401,39 @@ public final class OcrTranslateHelper {
     private static void finishLanguageDetected(
             String languageCode, List<Text.TextBlock> allBlocks,
             ResultCallback callback, long generation) {
+        finishLanguageDetected(languageCode, allBlocks, callback, generation, null);
+    }
+
+    private static void finishLanguageDetected(
+            String languageCode, List<Text.TextBlock> allBlocks,
+            ResultCallback callback, long generation, String sampleText) {
+        if (sampleText != null && !sampleText.isEmpty()) {
+            String sanitized = sanitizeDetectedLanguage(sampleText, languageCode);
+            if (sanitized != null) languageCode = sanitized;
+            else if (isUnreliableLatinGuess(languageCode)) {
+                Log.d(TAG, "Tolak deteksi tidak andal: " + languageCode);
+                callback.onSuccess(toUntranslatedBlocks(allBlocks));
+                return;
+            }
+        } else if (isUnreliableLatinGuess(languageCode)) {
+            // Tanpa sample: coba skrip dari semua blok
+            StringBuilder sb = new StringBuilder();
+            for (Text.TextBlock b : allBlocks) {
+                if (b != null && b.getText() != null) sb.append(b.getText()).append("\n");
+            }
+            String sanitized = sanitizeDetectedLanguage(sb.toString(), languageCode);
+            if (sanitized != null) languageCode = sanitized;
+            else {
+                Log.d(TAG, "Tolak deteksi tidak andal: " + languageCode);
+                callback.onSuccess(toUntranslatedBlocks(allBlocks));
+                return;
+            }
+        }
         if (TARGET_LANGUAGE.equals(languageCode)) {
             callback.onSuccess(toUntranslatedBlocks(allBlocks));
             return;
         }
+        Log.d(TAG, "Lanjut translate dengan bahasa: " + languageCode);
         translateBlocksIfModelAvailable(allBlocks, languageCode, callback, generation);
     }
 
