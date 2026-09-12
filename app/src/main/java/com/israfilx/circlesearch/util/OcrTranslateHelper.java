@@ -701,7 +701,13 @@ public final class OcrTranslateHelper {
         return b;
     }
 
-    private static final float MIN_TESS_LINE_CONFIDENCE = 40f;
+    /**
+     * Confidence filter longgar untuk Arab:
+     * OCR Arab (terutama berharakat) sering conf 15–35 meski teksnya benar.
+     * Filter ketat 40 membuat baris valid ikut dibuang (lihat log Skip baris conf=16…).
+     */
+    private static final float MIN_TESS_LINE_CONFIDENCE_HARD = 12f;
+    private static final float MIN_TESS_LINE_CONFIDENCE_SOFT = 28f;
 
     private static List<TranslatedBlock> runTesseractWithLang(Context context, Bitmap bitmap, String lang) {
         TessBaseAPI tess = null;
@@ -743,9 +749,18 @@ public final class OcrTranslateHelper {
                         try {
                             conf = it.confidence(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                         } catch (Throwable ignored) {}
-                        // Buang baris confidence rendah (sumber utama terjemahan kacau)
-                        if (conf > 0f && conf < MIN_TESS_LINE_CONFIDENCE) {
-                            Log.d(TAG, "Skip baris conf=" + conf + " text=[" +
+                        boolean hasScript = textHasArabicOrThai(text);
+                        // Filter confidence:
+                        // - conf sangat rendah (<12) → buang (noise murni)
+                        // - conf rendah (12–28) → buang HANYA jika bukan aksara Arab/Thai
+                        // - teks Arab/Thai dengan conf sedang tetap dipertahankan
+                        if (conf > 0f && conf < MIN_TESS_LINE_CONFIDENCE_HARD) {
+                            Log.d(TAG, "Skip baris conf=" + conf + " (hard) text=[" +
+                                    (text.length() > 40 ? text.substring(0, 40) + "…" : text) + "]");
+                            continue;
+                        }
+                        if (conf > 0f && conf < MIN_TESS_LINE_CONFIDENCE_SOFT && !hasScript) {
+                            Log.d(TAG, "Skip baris conf=" + conf + " (soft, no script) text=[" +
                                     (text.length() > 40 ? text.substring(0, 40) + "…" : text) + "]");
                             continue;
                         }
@@ -791,7 +806,10 @@ public final class OcrTranslateHelper {
             char c = text.charAt(i);
             if (Character.isWhitespace(c)) continue;
             total++;
-            if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0E00 && c <= 0x0E7F)) {
+            // Arab + harakat + presentation forms + Thai
+            if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)
+                    || (c >= 0x08A0 && c <= 0x08FF) || (c >= 0xFB50 && c <= 0xFDFF)
+                    || (c >= 0xFE70 && c <= 0xFEFF) || (c >= 0x0E00 && c <= 0x0E7F)) {
                 arabicThai++;
                 letters++;
             } else if (Character.isLetter(c)) {
@@ -799,8 +817,10 @@ public final class OcrTranslateHelper {
             } else if (c == 0xFFFD || (c > 0x024F && c < 0x0600)) {
                 weird++;
             }
+            // digit/punctuation biasa tidak dihitung weird
         }
         if (total == 0) return true;
+        // Ada aksara Arab/Thai yang cukup → jangan anggap garbage
         if (arabicThai >= 2 || (arabicThai > 0 && arabicThai * 2 >= total)) return false;
         if (weird * 2 >= total) return true;
         if (letters * 3 < total) return true;
