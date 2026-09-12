@@ -117,7 +117,28 @@ public final class OcrTranslateHelper {
             new LanguageInfo(TranslateLanguage.POLISH, "Polish (Polandia)"),
             new LanguageInfo(TranslateLanguage.UKRAINIAN, "Ukrainian (Ukraina)"),
             new LanguageInfo(TranslateLanguage.MALAY, "Malay (Melayu)"),
-            new LanguageInfo(TranslateLanguage.TAGALOG, "Filipino / Tagalog")
+            new LanguageInfo(TranslateLanguage.TAGALOG, "Filipino / Tagalog"),
+            new LanguageInfo(TranslateLanguage.BENGALI, "Bengali"),
+            new LanguageInfo(TranslateLanguage.TAMIL, "Tamil"),
+            new LanguageInfo(TranslateLanguage.TELUGU, "Telugu"),
+            new LanguageInfo(TranslateLanguage.GUJARATI, "Gujarati"),
+            new LanguageInfo(TranslateLanguage.KANNADA, "Kannada"),
+            new LanguageInfo(TranslateLanguage.MARATHI, "Marathi"),
+            new LanguageInfo(TranslateLanguage.URDU, "Urdu"),
+            new LanguageInfo(TranslateLanguage.PERSIAN, "Persian (Farsi)"),
+            new LanguageInfo(TranslateLanguage.HEBREW, "Hebrew (Ibrani)"),
+            new LanguageInfo(TranslateLanguage.GREEK, "Greek (Yunani)"),
+            new LanguageInfo(TranslateLanguage.CZECH, "Czech (Ceko)"),
+            new LanguageInfo(TranslateLanguage.ROMANIAN, "Romanian (Rumania)"),
+            new LanguageInfo(TranslateLanguage.HUNGARIAN, "Hungarian (Hungaria)"),
+            new LanguageInfo(TranslateLanguage.SWEDISH, "Swedish (Swedia)"),
+            new LanguageInfo(TranslateLanguage.FINNISH, "Finnish (Finlandia)"),
+            new LanguageInfo(TranslateLanguage.DANISH, "Danish (Denmark)"),
+            new LanguageInfo(TranslateLanguage.NORWEGIAN, "Norwegian (Norwegia)"),
+            new LanguageInfo(TranslateLanguage.SLOVAK, "Slovak"),
+            new LanguageInfo(TranslateLanguage.BULGARIAN, "Bulgarian (Bulgaria)"),
+            new LanguageInfo(TranslateLanguage.CROATIAN, "Croatian (Kroasia)"),
+            new LanguageInfo(TranslateLanguage.GEORGIAN, "Georgian (Georgia)")
     ));
 
     /**
@@ -338,15 +359,17 @@ public final class OcrTranslateHelper {
                 + ", jumlah blok=" + (bestBlocks == null ? 0 : bestBlocks.size()));
 
         // Tesseract hanya untuk kandidat Arab/Thai.
-        // Jika ML Kit sudah kuat di Latin/CJK/Devanagari, JANGAN jalankan Tesseract
-        // (menghindari hasil Latin diganti sampah Thai + mempercepat proses).
-        boolean mlKitAlreadyStrong = bestScore >= 80
-                && bestScript != null
-                && ("Latin".equals(bestScript)
-                    || "Chinese".equals(bestScript)
-                    || "Japanese".equals(bestScript)
-                    || "Korean".equals(bestScript)
-                    || "Devanagari".equals(bestScript));
+        // Latin/CJK: ambang lebih rendah (teks pendek sering skor 25–50).
+        // Devanagari: ambang lebih tinggi — Arab sering salah terbaca sebagai Devanagari.
+        boolean mlKitAlreadyStrong = false;
+        if (bestScript != null && bestScore > 0) {
+            if ("Latin".equals(bestScript) || "Chinese".equals(bestScript)
+                    || "Japanese".equals(bestScript) || "Korean".equals(bestScript)) {
+                mlKitAlreadyStrong = bestScore >= 25;
+            } else if ("Devanagari".equals(bestScript)) {
+                mlKitAlreadyStrong = bestScore >= 80;
+            }
+        }
 
         if (context != null && bitmap != null && !mlKitAlreadyStrong) {
             final List<Text.TextBlock> mlKitBlocks = bestBlocks;
@@ -394,29 +417,27 @@ public final class OcrTranslateHelper {
                         + " hasArabThai=" + mlKitHasScript
                         + " | Tesseract skor=" + tessScore + " hasArabThai=" + tessHasScript);
 
-                // Tesseract HANYA untuk Arab/Thai.
-                // Jangan pernah menimpa hasil ML Kit Latin/CJK/Devanagari yang kuat
-                // (bug sebelumnya: OCR Latin bagus skor 900 diganti sampah Thai).
-                boolean mlKitStrongScript = mlKitScore >= 80
-                        && mlKitScript != null
-                        && !"none".equals(mlKitScript)
+                // Tesseract HANYA untuk Arab/Thai — jangan timpa Latin/CJK.
+                boolean mlKitProtectLatinCjk = mlKitScript != null
+                        && mlKitScore >= 25
                         && ("Latin".equals(mlKitScript)
                             || "Chinese".equals(mlKitScript)
                             || "Japanese".equals(mlKitScript)
-                            || "Korean".equals(mlKitScript)
-                            || "Devanagari".equals(mlKitScript));
+                            || "Korean".equals(mlKitScript));
+                boolean mlKitStrongDevanagari = "Devanagari".equals(mlKitScript) && mlKitScore >= 80;
+                boolean mlKitStrongScript = mlKitProtectLatinCjk || mlKitStrongDevanagari;
 
                 boolean preferTess = false;
                 if (tessBlocks != null && !tessBlocks.isEmpty() && tessHasScript) {
                     if (mlKitStrongScript) {
-                        preferTess = false; // pertahankan ML Kit
-                    } else if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0) {
-                        preferTess = true; // ML Kit gagal total
-                    } else if (!mlKitHasScript && mlKitScore < 100) {
-                        // ML Kit lemah + tidak ada aksara Arab/Thai → Tesseract boleh
+                        preferTess = false;
+                    } else if (mlKitBlocks == null || mlKitBlocks.isEmpty() || mlKitScore <= 0
+                            || "none".equals(mlKitScript)) {
+                        preferTess = true; // ML Kit gagal
+                    } else if ("Devanagari".equals(mlKitScript) && mlKitScore < 80) {
+                        // Arab sering terbaca Devanagari lemah → izinkan Tesseract
                         preferTess = true;
-                    } else if (tessScore > mlKitScore * 3 && mlKitScore < 60) {
-                        // Tesseract jauh lebih kuat dan ML Kit sangat lemah
+                    } else if (!mlKitHasScript && mlKitScore < 25) {
                         preferTess = true;
                     }
                 }
@@ -1061,8 +1082,130 @@ public final class OcrTranslateHelper {
      * Validasi hasil LanguageIdentifier terhadap isi teks.
      * Menolak hasil absurd (mis. teks Cina → "ca", teks Cyrillic → "ig").
      */
+    /**
+     * Samakan kode Language Identifier dengan kode TranslateLanguage ML Kit.
+     * Contoh: fil→tl, iw→he, zh-cn→zh, nb→no.
+     */
+    private static String normalizeLanguageCode(String code) {
+        if (code == null || code.isEmpty() || "und".equals(code)) return null;
+        String c = code.trim().toLowerCase(java.util.Locale.US);
+        // Buang region/script: zh-cn, zh-Hans, pt-BR → ambil bagian depan
+        int dash = c.indexOf('-');
+        if (dash > 0) {
+            String base = c.substring(0, dash);
+            String rest = c.substring(dash + 1);
+            // khusus Cina
+            if ("zh".equals(base)) return TranslateLanguage.CHINESE;
+            // pt-BR / pt-PT
+            if ("pt".equals(base)) return TranslateLanguage.PORTUGUESE;
+            c = base;
+        }
+        switch (c) {
+            case "fil": // Language ID
+            case "tl":  // Translate
+            case "tgl":
+                return TranslateLanguage.TAGALOG;
+            case "iw": // kode lama Ibrani
+                return TranslateLanguage.HEBREW;
+            case "he":
+                return TranslateLanguage.HEBREW;
+            case "nb": // Bokmål
+            case "nn": // Nynorsk
+            case "no":
+                return TranslateLanguage.NORWEGIAN;
+            case "jw": // kadang muncul untuk Jawa — tidak didukung; jangan pakai
+                return null;
+            case "in": // kode lama Indonesia
+                return TranslateLanguage.INDONESIAN;
+            case "fa":
+                return TranslateLanguage.PERSIAN;
+            case "ur":
+                return TranslateLanguage.URDU;
+            case "uk":
+                return TranslateLanguage.UKRAINIAN;
+            case "vi":
+                return TranslateLanguage.VIETNAMESE;
+            case "es":
+                return TranslateLanguage.SPANISH;
+            case "tr":
+                return TranslateLanguage.TURKISH;
+            case "ms":
+            case "msa":
+                return TranslateLanguage.MALAY;
+            case "id":
+                return TranslateLanguage.INDONESIAN;
+            case "en":
+                return TranslateLanguage.ENGLISH;
+            case "fr":
+                return TranslateLanguage.FRENCH;
+            case "de":
+                return TranslateLanguage.GERMAN;
+            case "it":
+                return TranslateLanguage.ITALIAN;
+            case "nl":
+                return TranslateLanguage.DUTCH;
+            case "pl":
+                return TranslateLanguage.POLISH;
+            case "ru":
+                return TranslateLanguage.RUSSIAN;
+            case "ar":
+                return TranslateLanguage.ARABIC;
+            case "th":
+                return TranslateLanguage.THAI;
+            case "hi":
+                return TranslateLanguage.HINDI;
+            case "ja":
+                return TranslateLanguage.JAPANESE;
+            case "ko":
+                return TranslateLanguage.KOREAN;
+            case "zh":
+                return TranslateLanguage.CHINESE;
+            case "pt":
+                return TranslateLanguage.PORTUGUESE;
+            case "bn":
+                return TranslateLanguage.BENGALI;
+            case "ta":
+                return TranslateLanguage.TAMIL;
+            case "te":
+                return TranslateLanguage.TELUGU;
+            case "gu":
+                return TranslateLanguage.GUJARATI;
+            case "kn":
+                return TranslateLanguage.KANNADA;
+            case "mr":
+                return TranslateLanguage.MARATHI;
+            case "el":
+                return TranslateLanguage.GREEK;
+            case "cs":
+                return TranslateLanguage.CZECH;
+            case "ro":
+                return TranslateLanguage.ROMANIAN;
+            case "hu":
+                return TranslateLanguage.HUNGARIAN;
+            case "sv":
+                return TranslateLanguage.SWEDISH;
+            case "fi":
+                return TranslateLanguage.FINNISH;
+            case "da":
+                return TranslateLanguage.DANISH;
+            case "sk":
+                return TranslateLanguage.SLOVAK;
+            case "bg":
+                return TranslateLanguage.BULGARIAN;
+            case "hr":
+                return TranslateLanguage.CROATIAN;
+            case "ka":
+                return TranslateLanguage.GEORGIAN;
+            default:
+                // kembalikan kode apa adanya jika sudah 2 huruf
+                return c.length() == 2 ? c : null;
+        }
+    }
+
     private static String sanitizeDetectedLanguage(String text, String detected) {
         if (detected == null || "und".equals(detected)) return null;
+        detected = normalizeLanguageCode(detected);
+        if (detected == null) return null;
         String fromScript = detectScriptLanguage(text);
         if (fromScript != null) {
             // Skrip non-Latin menang mutlak atas LanguageIdentifier
@@ -1116,12 +1259,15 @@ public final class OcrTranslateHelper {
     private static void doTranslateOnTranslatedBlocks(
             List<TranslatedBlock> blocks, String sourceLang,
             ResultCallback callback, long generation) {
-        isModelDownloaded(sourceLang, new ModelCallback() {
+        String norm = normalizeLanguageCode(sourceLang);
+        if (norm != null) sourceLang = norm;
+        final String lang = sourceLang;
+        isModelDownloaded(lang, new ModelCallback() {
             @Override
             public void onSuccess() {
                 if (!isCurrent(generation)) return;
                 TranslatorOptions opts = new TranslatorOptions.Builder()
-                        .setSourceLanguage(sourceLang)
+                        .setSourceLanguage(lang)
                         .setTargetLanguage(TARGET_LANGUAGE)
                         .build();
                 Translator translator = Translation.getClient(opts);
@@ -1158,7 +1304,7 @@ public final class OcrTranslateHelper {
             @Override
             public void onFailure(Exception e) {
                 if (!isCurrent(generation)) return;
-                Log.w(TAG, "Model " + sourceLang + " belum diunduh untuk hasil Tesseract");
+                Log.w(TAG, "Model " + lang + " belum diunduh untuk hasil Tesseract");
                 callback.onModelNotDownloaded(sourceLang);
                 callback.onSuccess(blocks);
             }
@@ -1502,20 +1648,25 @@ public final class OcrTranslateHelper {
             List<Text.TextBlock> textBlocks, String sourceLanguageCode,
             ResultCallback callback, long generation) {
 
-        isModelDownloaded(sourceLanguageCode, new ModelCallback() {
+        String normalized = normalizeLanguageCode(sourceLanguageCode);
+        if (normalized != null) sourceLanguageCode = normalized;
+        final String lang = sourceLanguageCode;
+        Log.d(TAG, "translateBlocksIfModelAvailable lang=" + lang);
+
+        isModelDownloaded(lang, new ModelCallback() {
             @Override
             public void onSuccess() {
                 // Model tersedia → lanjut translate
                 if (!isCurrent(generation)) return;
-                doTranslateBlocks(textBlocks, sourceLanguageCode, callback, generation);
+                doTranslateBlocks(textBlocks, lang, callback, generation);
             }
 
             @Override
             public void onFailure(Exception e) {
                 // Model belum diunduh atau gagal cek → tampilkan teks asli
                 if (!isCurrent(generation)) return;
-                Log.w(TAG, "Model bahasa " + sourceLanguageCode + " belum diunduh, tampilkan teks asli");
-                callback.onModelNotDownloaded(sourceLanguageCode);
+                Log.w(TAG, "Model bahasa " + lang + " belum diunduh, tampilkan teks asli");
+                callback.onModelNotDownloaded(lang);
                 callback.onSuccess(toUntranslatedBlocks(textBlocks));
             }
         });
