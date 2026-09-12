@@ -490,11 +490,19 @@ public final class OcrTranslateHelper {
         return dir;
     }
 
+    /**
+     * ara.traineddata "best" ~12MB (jauh lebih akurat dari "fast" ~1MB).
+     * tha.traineddata "fast" sudah cukup baik dan lebih ringan.
+     */
+    private static final long MIN_ARA_TRAINEDDATA_BYTES = 3_000_000L; // bedakan fast vs best
+    private static final long MIN_THA_TRAINEDDATA_BYTES = 50_000L;
+
     private static boolean isTessdataReady(Context context) {
         File dir = getTessdataDir(context);
         File ara = new File(dir, "ara.traineddata");
         File tha = new File(dir, "tha.traineddata");
-        return ara.exists() && ara.length() > 10000 && tha.exists() && tha.length() > 10000;
+        return ara.exists() && ara.length() >= MIN_ARA_TRAINEDDATA_BYTES
+                && tha.exists() && tha.length() >= MIN_THA_TRAINEDDATA_BYTES;
     }
 
     public static void ensureTessdata(Context context, ModelCallback callback) {
@@ -505,9 +513,25 @@ public final class OcrTranslateHelper {
         new Thread(() -> {
             try {
                 File dir = getTessdataDir(context);
-                String base = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/";
-                downloadFile(base + "ara.traineddata", new File(dir, "ara.traineddata"), callback, "Arabic OCR");
-                downloadFile(base + "tha.traineddata", new File(dir, "tha.traineddata"), callback, "Thai OCR");
+                File ara = new File(dir, "ara.traineddata");
+                File tha = new File(dir, "tha.traineddata");
+
+                // Upgrade: hapus ara "fast" lama yang terlalu kecil/akurasi buruk
+                if (ara.exists() && ara.length() < MIN_ARA_TRAINEDDATA_BYTES) {
+                    Log.d(TAG, "Mengganti ara.traineddata fast (" + ara.length()
+                            + " byte) dengan versi best…");
+                    //noinspection ResultOfMethodCallIgnored
+                    ara.delete();
+                }
+
+                // Arabic: tessdata_best (akurasi jauh lebih baik)
+                String bestBase = "https://github.com/tesseract-ocr/tessdata_best/raw/main/";
+                String fastBase = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/";
+                downloadFile(bestBase + "ara.traineddata", ara, callback,
+                        "Arabic OCR (best, ~12MB)", MIN_ARA_TRAINEDDATA_BYTES);
+                downloadFile(fastBase + "tha.traineddata", tha, callback,
+                        "Thai OCR", MIN_THA_TRAINEDDATA_BYTES);
+
                 if (isTessdataReady(context)) {
                     callback.onSuccess();
                 } else {
@@ -519,26 +543,39 @@ public final class OcrTranslateHelper {
         }).start();
     }
 
-    private static void downloadFile(String urlStr, File out, ModelCallback callback, String label) throws Exception {
-        if (out.exists() && out.length() > 10000) return;
+    private static void downloadFile(String urlStr, File out, ModelCallback callback,
+            String label, long minBytes) throws Exception {
+        if (out.exists() && out.length() >= minBytes) return;
+        if (out.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            out.delete();
+        }
         callback.onProgress("Mengunduh " + label + "…");
+        Log.d(TAG, "Downloading " + label + " from " + urlStr);
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         conn.setConnectTimeout(30000);
-        conn.setReadTimeout(120000);
+        conn.setReadTimeout(180000);
         conn.setInstanceFollowRedirects(true);
         conn.setRequestProperty("User-Agent", "CircleSearch/1.9");
         try (InputStream in = new BufferedInputStream(conn.getInputStream());
              FileOutputStream fos = new FileOutputStream(out)) {
             byte[] buf = new byte[8192];
             int n;
+            long total = 0;
             while ((n = in.read(buf)) != -1) {
                 fos.write(buf, 0, n);
+                total += n;
             }
             fos.flush();
+            Log.d(TAG, "Downloaded " + out.getName() + " size=" + total);
         } finally {
             conn.disconnect();
         }
-        Log.d(TAG, "Downloaded " + out.getName() + " size=" + out.length());
+        if (out.length() < minBytes) {
+            //noinspection ResultOfMethodCallIgnored
+            out.delete();
+            throw new Exception("File " + out.getName() + " terlalu kecil setelah unduh");
+        }
     }
 
     private static List<TranslatedBlock> runTesseractOcr(Context context, Bitmap bitmap) {
@@ -639,16 +676,23 @@ public final class OcrTranslateHelper {
 
     private static Bitmap prepareBitmapForTesseract(Bitmap src) {
         if (src == null) return null;
+        // Scale-up agresif: teks di screenshot HP sering terlalu kecil untuk Tesseract
+        float scale = 1f;
+        if (src.getWidth() < 800 || src.getHeight() < 400) {
+            scale = Math.max(800f / Math.max(src.getWidth(), 1),
+                    400f / Math.max(src.getHeight(), 1));
+            scale = Math.min(Math.max(scale, 1.5f), 3.5f);
+        } else if (src.getWidth() < 1200) {
+            scale = 1.5f;
+        }
         Bitmap b = src;
-        if (src.getWidth() < 400 || src.getHeight() < 200) {
-            float scale = Math.max(400f / src.getWidth(), 200f / src.getHeight());
-            scale = Math.min(scale, 3f);
+        if (scale > 1.05f) {
             int w = Math.round(src.getWidth() * scale);
             int h = Math.round(src.getHeight() * scale);
             b = Bitmap.createScaledBitmap(src, w, h, true);
         }
         if (b.getConfig() != Bitmap.Config.ARGB_8888) {
-            Bitmap converted = b.copy(Bitmap.Config.ARGB_8888, false);
+            Bitmap converted = b.copy(Bitmap.Config.ARGB_8888, true);
             if (b != src && !b.isRecycled()) {
                 try { b.recycle(); } catch (Exception ignored) {}
             }
@@ -656,6 +700,8 @@ public final class OcrTranslateHelper {
         }
         return b;
     }
+
+    private static final float MIN_TESS_LINE_CONFIDENCE = 40f;
 
     private static List<TranslatedBlock> runTesseractWithLang(Context context, Bitmap bitmap, String lang) {
         TessBaseAPI tess = null;
@@ -672,7 +718,12 @@ public final class OcrTranslateHelper {
                 Log.w(TAG, "TessBaseAPI.init gagal untuk " + lang);
                 return null;
             }
+            // PSM_AUTO bagus untuk potongan seleksi; untuk Arab RTL LSTM tetap jalan
             tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO);
+            // Pertahankan spasi antar kata (penting untuk Arab)
+            try {
+                tess.setVariable("preserve_interword_spaces", "1");
+            } catch (Throwable ignored) {}
             tess.setImage(bitmap);
 
             String fullText = tess.getUTF8Text();
@@ -688,6 +739,16 @@ public final class OcrTranslateHelper {
                         if (text == null) continue;
                         text = text.trim();
                         if (text.isEmpty()) continue;
+                        float conf = 0f;
+                        try {
+                            conf = it.confidence(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
+                        } catch (Throwable ignored) {}
+                        // Buang baris confidence rendah (sumber utama terjemahan kacau)
+                        if (conf > 0f && conf < MIN_TESS_LINE_CONFIDENCE) {
+                            Log.d(TAG, "Skip baris conf=" + conf + " text=[" +
+                                    (text.length() > 40 ? text.substring(0, 40) + "…" : text) + "]");
+                            continue;
+                        }
                         if (isMostlyGarbageLine(text)) continue;
                         Rect rect = it.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                         if (rect != null && rect.width() > 2 && rect.height() > 2) {
