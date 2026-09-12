@@ -1,8 +1,13 @@
 package com.israfilx.circlesearch.util;
 
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.util.Log;
+
+import com.googlecode.tesseract.android.ResultIterator;
+import com.googlecode.tesseract.android.TessBaseAPI;
+
 
 import com.google.android.gms.tasks.Task;
 import com.google.android.gms.tasks.Tasks;
@@ -27,6 +32,12 @@ import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions;
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -210,16 +221,16 @@ public final class OcrTranslateHelper {
     private OcrTranslateHelper() {}
 
     /** Jalankan OCR + translate ke {@link #TARGET_LANGUAGE}. */
-    public static void recognizeAndTranslate(Bitmap bitmap, ResultCallback callback) {
-        recognizeInternal(bitmap, callback, true);
+    public static void recognizeAndTranslate(Context context, Bitmap bitmap, ResultCallback callback) {
+        recognizeInternal(context, bitmap, callback, true);
     }
 
     /**
      * Jalankan OCR SAJA tanpa translate sama sekali — dipakai untuk fitur
      * "Salin Teks".
      */
-    public static void recognizeTextOnly(Bitmap bitmap, ResultCallback callback) {
-        recognizeInternal(bitmap, callback, false);
+    public static void recognizeTextOnly(Context context, Bitmap bitmap, ResultCallback callback) {
+        recognizeInternal(context, bitmap, callback, false);
     }
 
     /**
@@ -233,7 +244,7 @@ public final class OcrTranslateHelper {
      * kosong. Vietnamese memakai aksara Latin (dengan diakritik) jadi seharusnya
      * terdeteksi oleh recognizer Latin.
      */
-    private static void recognizeInternal(Bitmap bitmap, ResultCallback callback, boolean alsoTranslate) {
+    private static void recognizeInternal(Context context, Bitmap bitmap, ResultCallback callback, boolean alsoTranslate) {
         final long myGeneration = requestGeneration.incrementAndGet();
         final InputImage image = InputImage.fromBitmap(bitmap, 0);
 
@@ -265,8 +276,8 @@ public final class OcrTranslateHelper {
                         results[idx] = blocks != null ? blocks : Collections.emptyList();
                         anySuccess.incrementAndGet();
                         Log.d(TAG, "OCR " + scriptNames[idx] + " selesai, blok=" + results[idx].size());
-                        finishMultiOcrIfDone(recognizers, results, remaining, anySuccess,
-                                callback, alsoTranslate, myGeneration);
+                        finishMultiOcrIfDone(context, recognizers, results, remaining, anySuccess,
+                                callback, alsoTranslate, myGeneration, bitmap);
                     })
                     .addOnFailureListener(e -> {
                         if (!isCurrent(myGeneration)) {
@@ -275,22 +286,23 @@ public final class OcrTranslateHelper {
                         }
                         Log.w(TAG, "OCR " + scriptNames[idx] + " gagal: " + e.getMessage());
                         results[idx] = Collections.emptyList();
-                        finishMultiOcrIfDone(recognizers, results, remaining, anySuccess,
-                                callback, alsoTranslate, myGeneration);
+                        finishMultiOcrIfDone(context, recognizers, results, remaining, anySuccess,
+                                callback, alsoTranslate, myGeneration, bitmap);
                     });
         }
     }
 
     private static void finishMultiOcrIfDone(
+            final Context context,
             TextRecognizer[] recognizers,
             List<Text.TextBlock>[] results,
             AtomicInteger remaining,
             AtomicInteger anySuccess,
-            ResultCallback callback,
-            boolean alsoTranslate,
-            long generation) {
+            final ResultCallback callback,
+            final boolean alsoTranslate,
+            final long generation,
+            final Bitmap bitmap) {
         if (remaining.decrementAndGet() != 0) return;
-        // Semua recognizer sudah selesai (sukses atau gagal)
         for (TextRecognizer r : recognizers) {
             try { r.close(); } catch (Exception ignored) {}
         }
@@ -298,13 +310,15 @@ public final class OcrTranslateHelper {
 
         if (anySuccess.get() == 0) {
             Log.e(TAG, "Semua OCR gagal");
+            // Coba Tesseract sebagai last resort
+            if (context != null && bitmap != null) {
+                tryTesseractFallback(context, bitmap, alsoTranslate, callback, generation);
+                return;
+            }
             callback.onError(new Exception("OCR gagal pada semua skrip"));
             return;
         }
 
-        // Pilih hasil dengan skor tertinggi: total karakter signifikan
-        // (tinggi blok + panjang teks). Prefer hasil yang punya lebih banyak
-        // konten nyata daripada hanya noise status-bar.
         List<Text.TextBlock> bestBlocks = Collections.emptyList();
         int bestScore = -1;
         String bestScript = "none";
@@ -319,20 +333,307 @@ public final class OcrTranslateHelper {
             }
         }
 
-        if (bestBlocks.isEmpty() || bestScore <= 0) {
-            Log.d(TAG, "Tidak ada teks signifikan dari OCR multi-skrip");
-            callback.onNoTextFound();
+        Log.d(TAG, "OCR terbaik: skrip=" + bestScript + ", skor=" + bestScore
+                + ", jumlah blok=" + (bestBlocks == null ? 0 : bestBlocks.size()));
+
+        // Fallback Tesseract untuk Arab / Thai jika skor ML Kit rendah
+        // (threshold 80: cukup ketat supaya hanya dipakai saat ML Kit hampir kosong)
+        if (bestScore < 80 && context != null && bitmap != null) {
+            Log.d(TAG, "Skor ML Kit rendah (" + bestScore + "), coba Tesseract Arab/Thai…");
+            tryTesseractFallback(context, bitmap, alsoTranslate, callback, generation);
             return;
         }
 
-        Log.d(TAG, "OCR terbaik: skrip=" + bestScript + ", skor=" + bestScore
-                + ", jumlah blok=" + bestBlocks.size());
+        if (bestBlocks == null || bestBlocks.isEmpty() || bestScore <= 0) {
+            Log.d(TAG, "Tidak ada teks signifikan dari OCR");
+            callback.onNoTextFound();
+            return;
+        }
 
         if (!alsoTranslate) {
             callback.onSuccess(toUntranslatedBlocks(bestBlocks));
             return;
         }
         detectLanguageAndTranslateBlocks(bestBlocks, callback, generation);
+    }
+
+    /**
+     * Jalankan Tesseract (ara + tha) sebagai fallback.
+     * Jika traineddata belum ada, coba unduh dulu (sekali saja, gratis).
+     * Hasil berupa List&lt;TranslatedBlock&gt; yang langsung bisa dipakai overlay + translate.
+     */
+    private static void tryTesseractFallback(final Context context, final Bitmap bitmap,
+            final boolean alsoTranslate, final ResultCallback callback, final long generation) {
+        // Pastikan tessdata ara + tha tersedia
+        ensureTessdata(context, new ModelCallback() {
+            @Override
+            public void onSuccess() {
+                if (!isCurrent(generation)) return;
+                List<TranslatedBlock> blocks = runTesseractOcr(context, bitmap);
+                if (blocks == null || blocks.isEmpty()) {
+                    Log.d(TAG, "Tesseract tidak menemukan teks");
+                    callback.onNoTextFound();
+                    return;
+                }
+                Log.d(TAG, "Tesseract berhasil, blok=" + blocks.size());
+                if (!alsoTranslate) {
+                    callback.onSuccess(blocks);
+                    return;
+                }
+                // Lanjut deteksi bahasa + translate dari teks Tesseract
+                translateTranslatedBlocks(blocks, callback, generation);
+            }
+            @Override
+            public void onFailure(Exception e) {
+                if (!isCurrent(generation)) return;
+                Log.w(TAG, "Tesseract fallback gagal (traineddata?): " + e.getMessage());
+                callback.onNoTextFound();
+            }
+            @Override
+            public void onProgress(String message) {
+                // bisa di-forward ke UI nanti jika perlu
+                Log.d(TAG, "Tessdata: " + message);
+            }
+        });
+    }
+
+    /** Path folder tessdata di internal storage. */
+    private static File getTessdataDir(Context context) {
+        File dir = new File(context.getFilesDir(), "tessdata");
+        if (!dir.exists()) dir.mkdirs();
+        return dir;
+    }
+
+    private static boolean isTessdataReady(Context context) {
+        File dir = getTessdataDir(context);
+        File ara = new File(dir, "ara.traineddata");
+        File tha = new File(dir, "tha.traineddata");
+        return ara.exists() && ara.length() > 10000 && tha.exists() && tha.length() > 10000;
+    }
+
+    /**
+     * Pastikan ara.traineddata + tha.traineddata ada.
+     * Unduh dari tessdata_fast (gratis) bila belum ada.
+     */
+    public static void ensureTessdata(Context context, ModelCallback callback) {
+        if (isTessdataReady(context)) {
+            callback.onSuccess();
+            return;
+        }
+        // Unduh di background thread
+        new Thread(() -> {
+            try {
+                File dir = getTessdataDir(context);
+                String base = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/";
+                downloadFile(base + "ara.traineddata", new File(dir, "ara.traineddata"), callback, "Arabic OCR");
+                downloadFile(base + "tha.traineddata", new File(dir, "tha.traineddata"), callback, "Thai OCR");
+                if (isTessdataReady(context)) {
+                    callback.onSuccess();
+                } else {
+                    callback.onFailure(new Exception("Gagal mengunduh traineddata Arab/Thai"));
+                }
+            } catch (Exception e) {
+                callback.onFailure(e);
+            }
+        }).start();
+    }
+
+    private static void downloadFile(String urlStr, File out, ModelCallback callback, String label) throws Exception {
+        if (out.exists() && out.length() > 10000) return;
+        callback.onProgress("Mengunduh " + label + "…");
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        conn.setConnectTimeout(30000);
+        conn.setReadTimeout(60000);
+        conn.setInstanceFollowRedirects(true);
+        try (InputStream in = new BufferedInputStream(conn.getInputStream());
+             FileOutputStream fos = new FileOutputStream(out)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                fos.write(buf, 0, n);
+            }
+            fos.flush();
+        } finally {
+            conn.disconnect();
+        }
+        Log.d(TAG, "Downloaded " + out.getName() + " size=" + out.length());
+    }
+
+    /**
+     * Jalankan Tesseract dengan bahasa ara+tha.
+     * Mengembalikan list TranslatedBlock (teks asli + bounding box per baris).
+     */
+    private static List<TranslatedBlock> runTesseractOcr(Context context, Bitmap bitmap) {
+        TessBaseAPI tess = null;
+        try {
+            tess = new TessBaseAPI();
+            // datapath = parent of "tessdata" folder
+            String dataPath = context.getFilesDir().getAbsolutePath() + "/";
+            // Init dengan Arab + Thai (bisa deteksi campuran)
+            boolean ok = tess.init(dataPath, "ara+tha");
+            if (!ok) {
+                Log.e(TAG, "TessBaseAPI.init gagal");
+                return null;
+            }
+            tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO);
+            tess.setImage(bitmap);
+
+            // Harus panggil getUTF8Text dulu agar recognition jalan
+            tess.getUTF8Text();
+
+            List<TranslatedBlock> blocks = new ArrayList<>();
+            ResultIterator it = tess.getResultIterator();
+            if (it != null) {
+                try {
+                    // Ambil per TEXTLINE supaya bounding box masuk akal untuk overlay
+                    it.begin();
+                    do {
+                        String text = it.getUTF8Text(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
+                        if (text == null) continue;
+                        text = text.trim();
+                        if (text.isEmpty()) continue;
+                        Rect rect = it.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
+                        if (rect != null && rect.width() > 0 && rect.height() > 0) {
+                            blocks.add(new TranslatedBlock(text, text, new Rect(rect)));
+                        } else {
+                            blocks.add(new TranslatedBlock(text, text,
+                                    new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight())));
+                        }
+                    } while (it.next(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE));
+                } finally {
+                    it.delete();
+                }
+            }
+
+            // Jika iterator kosong, ambil seluruh teks sebagai 1 blok
+            if (blocks.isEmpty()) {
+                String full = tess.getUTF8Text();
+                if (full != null && !full.trim().isEmpty()) {
+                    blocks.add(new TranslatedBlock(full.trim(), full.trim(),
+                            new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight())));
+                }
+            }
+            return blocks.isEmpty() ? null : blocks;
+        } catch (Exception e) {
+            Log.e(TAG, "runTesseractOcr error", e);
+            return null;
+        } finally {
+            if (tess != null) {
+                try { tess.recycle(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    /**
+     * Deteksi bahasa + translate dari List&lt;TranslatedBlock&gt; (hasil Tesseract).
+     * Mirip detectLanguageAndTranslateBlocks tapi inputnya sudah TranslatedBlock.
+     */
+    private static void translateTranslatedBlocks(
+            List<TranslatedBlock> blocks, ResultCallback callback, long generation) {
+        if (blocks == null || blocks.isEmpty()) {
+            callback.onNoTextFound();
+            return;
+        }
+        // Gabungkan teks untuk language ID (prioritas blok terpanjang)
+        List<TranslatedBlock> sorted = new ArrayList<>(blocks);
+        Collections.sort(sorted, (a, b) ->
+                Integer.compare(b.originalText.trim().length(), a.originalText.trim().length()));
+        StringBuilder sb = new StringBuilder();
+        for (TranslatedBlock b : sorted) {
+            sb.append(b.originalText).append("\n");
+            if (sb.length() > 400) break;
+        }
+        String combined = sb.toString().trim();
+        if (combined.isEmpty()) {
+            callback.onSuccess(blocks);
+            return;
+        }
+
+        LanguageIdentificationOptions options = new LanguageIdentificationOptions.Builder()
+                .setConfidenceThreshold(LANGUAGE_CONFIDENCE_THRESHOLD)
+                .build();
+        LanguageIdentifier identifier = LanguageIdentification.getClient(options);
+        identifier.identifyLanguage(combined)
+                .addOnSuccessListener(langCode -> {
+                    if (!isCurrent(generation)) return;
+                    if (langCode == null || "und".equals(langCode)) {
+                        // coba possible languages
+                        identifier.identifyPossibleLanguages(combined)
+                                .addOnSuccessListener(cands -> {
+                                    if (!isCurrent(generation)) return;
+                                    String best = pickBestCandidate(cands);
+                                    if (best == null) {
+                                        callback.onSuccess(blocks); // tampilkan asli
+                                        return;
+                                    }
+                                    doTranslateOnTranslatedBlocks(blocks, best, callback, generation);
+                                })
+                                .addOnFailureListener(e -> {
+                                    if (isCurrent(generation)) callback.onSuccess(blocks);
+                                });
+                        return;
+                    }
+                    if (TARGET_LANGUAGE.equals(langCode)) {
+                        callback.onSuccess(blocks);
+                        return;
+                    }
+                    doTranslateOnTranslatedBlocks(blocks, langCode, callback, generation);
+                })
+                .addOnFailureListener(e -> {
+                    if (isCurrent(generation)) callback.onSuccess(blocks);
+                });
+    }
+
+    private static void doTranslateOnTranslatedBlocks(
+            List<TranslatedBlock> blocks, String sourceLang,
+            ResultCallback callback, long generation) {
+        isModelDownloaded(sourceLang, new ModelCallback() {
+            @Override
+            public void onSuccess() {
+                if (!isCurrent(generation)) return;
+                TranslatorOptions opts = new TranslatorOptions.Builder()
+                        .setSourceLanguage(sourceLang)
+                        .setTargetLanguage(TARGET_LANGUAGE)
+                        .build();
+                Translator translator = Translation.getClient(opts);
+                TranslatedBlock[] results = new TranslatedBlock[blocks.size()];
+                AtomicInteger remaining = new AtomicInteger(blocks.size());
+                for (int i = 0; i < blocks.size(); i++) {
+                    final int idx = i;
+                    TranslatedBlock b = blocks.get(i);
+                    translator.translate(b.originalText)
+                            .addOnSuccessListener(translated -> {
+                                results[idx] = new TranslatedBlock(b.originalText, translated, b.boundingBox);
+                                if (remaining.decrementAndGet() == 0) {
+                                    translator.close();
+                                    if (isCurrent(generation)) {
+                                        List<TranslatedBlock> list = new ArrayList<>();
+                                        for (TranslatedBlock r : results) if (r != null) list.add(r);
+                                        callback.onSuccess(list);
+                                    }
+                                }
+                            })
+                            .addOnFailureListener(e -> {
+                                results[idx] = b; // keep original
+                                if (remaining.decrementAndGet() == 0) {
+                                    translator.close();
+                                    if (isCurrent(generation)) {
+                                        List<TranslatedBlock> list = new ArrayList<>();
+                                        for (TranslatedBlock r : results) if (r != null) list.add(r);
+                                        callback.onSuccess(list);
+                                    }
+                                }
+                            });
+                }
+            }
+            @Override
+            public void onFailure(Exception e) {
+                if (!isCurrent(generation)) return;
+                Log.w(TAG, "Model " + sourceLang + " belum diunduh untuk hasil Tesseract");
+                callback.onModelNotDownloaded(sourceLang);
+                callback.onSuccess(blocks);
+            }
+        });
     }
 
     /** Skor sederhana: jumlah karakter dari blok yang lolos filter tinggi/panjang. */
