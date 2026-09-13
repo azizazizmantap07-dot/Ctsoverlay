@@ -451,8 +451,43 @@ public final class OcrTranslateHelper {
         // isScriptTextValid). Recognizer Latin selalu dianggap valid
         // (dipakai juga untuk bahasa berdiakritik seperti Vietnamese, jadi
         // tidak bisa divalidasi rentang Unicode secara ketat).
+        //
+        // PERBAIKAN BUG KEDUA (ditambahkan bersamaan dengan Tesseract Thai)
+        // — validasi dominasi karakter di atas TIDAK cukup untuk skrip yang
+        // visualnya mirip. Devanagari dan Thai sama-sama abugida berbentuk
+        // lengkung; ML Kit Devanagari kadang salah-baca teks Thai asli
+        // sebagai karakter Devanagari asli (bukan sampah campuran), jadi
+        // tetap lolos ambang 40% isScriptTextValid — lalu menang murni
+        // karena skornya (jumlah karakter) kebetulan lebih tinggi dari hasil
+        // Tesseract Thai yang justru BENAR. Pola yang sama juga terjadi
+        // antara Arabic dan Thai. Contoh nyata dari log: teks Thai
+        // terbaca "OCR terbaik: skrip=Devanagari" / "skrip=Arabic" berulang
+        // kali, padahal Tesseract Thai di capture yang sama juga
+        // menghasilkan blok valid.
+        //
+        // Perbaikan: recognizer Tesseract (Arabic, Thai) diberi BONUS skor
+        // tetap saat dibandingkan. Alasannya: keduanya pakai model bahasa
+        // KHUSUS untuk skrip itu (bukan model skrip lain yang "menebak"
+        // berdasarkan kemiripan visual seperti kasus Devanagari-vs-Thai di
+        // atas), jadi begitu lolos validasi dominasi karakter, hasilnya
+        // jauh lebih bisa dipercaya daripada ML Kit non-Latin yang menang
+        // cuma karena kebetulan menghasilkan lebih banyak karakter salah.
+        // Bonus ini TIDAK membuat Tesseract selalu menang mutlak — kalau
+        // ML Kit lain menghasilkan blok jauh lebih banyak/panjang secara
+        // sah (skrip yang benar-benar berbeda), skor aslinya (dikali
+        // bobot) tetap bisa mengalahkan bonus ini.
+        //
+        // Bonus ini adalah lapisan KEDUA. Lapisan pertama ada di
+        // isScriptTextValid: ambang dominasi karakter Devanagari dinaikkan
+        // ke 65% (dari 40%) karena Devanagari yang paling sering salah-baca
+        // Thai. Arabic SENGAJA dibiarkan di ambang 40% (tidak diketatkan)
+        // supaya hasil Arabic asli yang bercampur angka/tanda baca tidak
+        // ikut terbuang — kasus Arabic-vs-Thai yang lebih jarang itu cukup
+        // diatasi oleh bonus skor di bawah ini saja.
+        final int TESSERACT_PRIORITY_BONUS = 200;
         List<OcrBlock> bestBlocks = Collections.emptyList();
         int bestScore = -1;
+        int bestEffectiveScore = -1;
         String bestScript = "none";
         for (int i = 0; i < results.length; i++) {
             List<OcrBlock> blocks = results[i];
@@ -469,8 +504,11 @@ public final class OcrTranslateHelper {
                 continue;
             }
             int score = scoreOcrBlocks(blocks);
-            if (score > bestScore) {
+            boolean isTesseract = "Arabic".equals(script) || "Thai".equals(script);
+            int effectiveScore = isTesseract ? score + TESSERACT_PRIORITY_BONUS : score;
+            if (effectiveScore > bestEffectiveScore) {
                 bestScore = score;
+                bestEffectiveScore = effectiveScore;
                 bestBlocks = blocks;
                 bestScript = script;
             }
@@ -493,15 +531,35 @@ public final class OcrTranslateHelper {
     }
 
     /**
-     * True bila gabungan teks dari blok-blok ini didominasi (>= 40%)
-     * karakter dari rentang Unicode yang sesuai dengan nama skrip yang
-     * diberikan. Dipakai untuk memvalidasi hasil recognizer non-Latin
-     * (Chinese/Japanese/Korean/Devanagari) agar tidak "asal menang" saat
-     * sebenarnya salah membaca skrip lain sebagai skripnya sendiri.
+     * True bila gabungan teks dari blok-blok ini didominasi karakter dari
+     * rentang Unicode yang sesuai dengan nama skrip yang diberikan. Dipakai
+     * untuk memvalidasi hasil recognizer non-Latin (Chinese/Japanese/Korean/
+     * Devanagari/Arabic/Thai) agar tidak "asal menang" saat sebenarnya
+     * salah membaca skrip lain sebagai skripnya sendiri.
      *
-     * Ambang 40% (bukan >50%) sengaja dilonggarkan karena satu blok teks
-     * dunia nyata sering bercampur dengan angka/tanda baca/spasi/label
+     * Ambang dasar 40% (bukan >50%) sengaja dilonggarkan karena satu blok
+     * teks dunia nyata sering bercampur dengan angka/tanda baca/spasi/label
      * Latin (mis. merk, angka versi) di antara karakter skrip aslinya.
+     *
+     * PENGETATAN KHUSUS Devanagari (ambang 65%, bukan 40%) — ditambahkan
+     * setelah Tesseract Thai masuk sebagai recognizer, karena log nyata
+     * menunjukkan ML Kit Devanagari kerap salah-baca lengkungan aksara Thai
+     * sebagai karakter Devanagari ASLI (bukan sampah campuran skrip),
+     * sehingga tetap lolos ambang 40% dan menang secara skor padahal salah.
+     * Devanagari dan Thai sama-sama abugida berbentuk lengkung sehingga
+     * paling rawan tertukar secara visual di antara semua skrip yang
+     * didukung. Ambang 65% mengurangi false-positive ini tanpa membuang
+     * kasus Devanagari asli yang sah (teks Hindi/Nepali dunia nyata
+     * biasanya jauh di atas 65% dominasi dalam satu blok).
+     *
+     * Arabic SENGAJA TIDAK ikut diketatkan (tetap 40%) — kasus Arabic
+     * salah-baca Thai jauh lebih jarang dibanding Devanagari, dan
+     * mengetatkan ambang Arabic berisiko membuang hasil Arabic ASLI yang
+     * sah kalau blok teksnya bercampur banyak angka/tanda baca (umum di
+     * UI game/app). Kasus Arabic-vs-Thai yang tersisa ditangani lewat
+     * lapisan kedua: lihat TESSERACT_PRIORITY_BONUS di pemanggil
+     * (recognizeInternal) yang memberi keunggulan skor ke Tesseract
+     * (Arabic & Thai) begitu keduanya lolos validasi ini.
      */
     private static boolean isScriptTextValid(List<OcrBlock> blocks, String scriptName) {
         int scriptChars = 0;
@@ -517,7 +575,9 @@ public final class OcrTranslateHelper {
             }
         }
         if (totalNonSpace == 0) return false;
-        return scriptChars >= totalNonSpace * 0.4;
+        boolean isConfusableWithThai = "Devanagari".equals(scriptName);
+        double threshold = isConfusableWithThai ? 0.65 : 0.4;
+        return scriptChars >= totalNonSpace * threshold;
     }
 
     /**
