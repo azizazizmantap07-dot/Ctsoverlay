@@ -507,110 +507,96 @@ public final class OcrTranslateHelper {
     }
 
     /**
-     * True bila gabungan teks dari blok-blok ini didominasi (>= 55%)
-     * karakter dari rentang Unicode yang sesuai dengan nama skrip yang
-     * diberikan. Dipakai untuk memvalidasi hasil recognizer non-Latin
-     * (Chinese/Japanese/Korean/Devanagari/Arabic/Thai) agar tidak "asal
-     * menang" saat sebenarnya salah membaca skrip lain sebagai skripnya
-     * sendiri.
+     * True bila teks didominasi karakter skrip yang diminta.
      *
-     * Ambang dinaikkan dari 40% ke 55% setelah pengujian log nyata:
-     * Tesseract Arabic/Thai dan ML Kit Devanagari sering menghasilkan
-     * string panjang yang hanya sebagian kecil karakter skrip yang
-     * diminta (sisanya sampah/latin/angka), sehingga lolos 40% dan
-     * mengalahkan recognizer yang benar. 55% masih toleran terhadap
-     * campuran angka/tanda baca/label Latin di teks dunia nyata, tapi
-     * membuang kebanyakan hasil salah-baca.
+     * PERBAIKAN (v1.9.12):
+     * - Hanya huruf (Letter) yang dihitung di denominator — angka, tanda
+     *   baca, simbol, spasi diabaikan. Teks Arab/Thai/Hindi dunia nyata
+     *   sering penuh angka & punctuation; ambang lama 55% dari SEMUA
+     *   non-spasi membuat teks asli gagal validasi.
+     * - Ambang 35% dari huruf murni, ATAU minimal 6 huruf skrip absolut
+     *   (agar frasa pendek valid tetap lolos).
+     * - Pakai Character.UnicodeScript (lebih lengkap dari UnicodeBlock).
      */
     private static boolean isScriptTextValid(List<OcrBlock> blocks, String scriptName) {
-        int scriptChars = 0;
-        int totalNonSpace = 0;
+        int scriptLetters = 0;
+        int totalLetters = 0;
         for (OcrBlock block : blocks) {
             String text = block.getText();
             if (text == null) continue;
-            for (int i = 0; i < text.length(); i++) {
-                char c = text.charAt(i);
-                if (Character.isWhitespace(c)) continue;
-                totalNonSpace++;
-                if (isCharInScript(c, scriptName)) scriptChars++;
+            for (int i = 0; i < text.length(); ) {
+                int cp = text.codePointAt(i);
+                i += Character.charCount(cp);
+                if (!Character.isLetter(cp)) continue;
+                totalLetters++;
+                if (isCodePointInScript(cp, scriptName)) scriptLetters++;
             }
         }
-        if (totalNonSpace == 0) return false;
-        return scriptChars >= totalNonSpace * 0.55;
+        if (totalLetters == 0) return false;
+        // Lolos jika rasio huruf skrip >= 35% ATAU ada cukup banyak huruf skrip
+        // absolut (frasa pendek seperti "مرحبا" / "สวัสดี" / "नमस्ते").
+        boolean ok = scriptLetters >= totalLetters * 0.35 || scriptLetters >= 6;
+        if (!ok) {
+            Log.d(TAG, "OCR " + scriptName + " purity=" + scriptLetters + "/" + totalLetters
+                    + " (" + (totalLetters == 0 ? 0 : (scriptLetters * 100 / totalLetters)) + "%)");
+        }
+        return ok;
     }
 
     /**
-     * Rasio karakter skrip / total non-spasi (0.0–1.0). Dipakai untuk
-     * membobot skor OCR agar hasil yang lebih "murni" unggul.
+     * Rasio huruf skrip / total huruf (0.0–1.0). Dipakai untuk membobot skor.
      */
     private static double scriptPurity(List<OcrBlock> blocks, String scriptName) {
-        int scriptChars = 0;
-        int totalNonSpace = 0;
+        int scriptLetters = 0;
+        int totalLetters = 0;
         for (OcrBlock block : blocks) {
             String text = block.getText();
             if (text == null) continue;
-            for (int i = 0; i < text.length(); i++) {
-                char c = text.charAt(i);
-                if (Character.isWhitespace(c)) continue;
-                totalNonSpace++;
-                if (isCharInScript(c, scriptName)) scriptChars++;
+            for (int i = 0; i < text.length(); ) {
+                int cp = text.codePointAt(i);
+                i += Character.charCount(cp);
+                if (!Character.isLetter(cp)) continue;
+                totalLetters++;
+                if (isCodePointInScript(cp, scriptName)) scriptLetters++;
             }
         }
-        if (totalNonSpace == 0) return 0.0;
-        return (double) scriptChars / totalNonSpace;
+        if (totalLetters == 0) return 0.0;
+        return (double) scriptLetters / totalLetters;
     }
 
     /**
-     * Cek apakah satu karakter berada di rentang Unicode skrip yang disebut.
-     *
-     * "Arabic" DITAMBAHKAN bersamaan dengan {@link TesseractArabicRecognizer}
-     * — mencakup blok Unicode Arabic dasar, Arabic Supplement (huruf
-     * tambahan untuk bahasa non-Arab berskrip Arab seperti Urdu/Pashto/
-     * Sindhi), dan Arabic Presentation Forms A/B (bentuk sambung/kontekstual
-     * yang kadang muncul di hasil OCR mentah sebelum normalisasi).
-     *
-     * "Thai" DITAMBAHKAN bersamaan dengan {@link TesseractThaiRecognizer}
-     * — blok Unicode Thai mencakup seluruh aksara Thai (konsonan, vokal,
-     * tanda nada, dan angka Thai).
+     * Cek code point berada di skrip yang disebut, via UnicodeScript
+     * (lebih lengkap & akurat daripada daftar UnicodeBlock manual).
      */
-    private static boolean isCharInScript(char c, String scriptName) {
-        Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
-        if (block == null) return false;
+    private static boolean isCodePointInScript(int cp, String scriptName) {
+        Character.UnicodeScript us = Character.UnicodeScript.of(cp);
         switch (scriptName) {
             case "Chinese":
-                return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
-                        || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
-                        || block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION;
+                // Han = ideograf CJK; juga terima Common untuk beberapa tanda
+                return us == Character.UnicodeScript.HAN;
             case "Japanese":
-                return block == Character.UnicodeBlock.HIRAGANA
-                        || block == Character.UnicodeBlock.KATAKANA
-                        || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
-                        || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
-                        || block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION;
+                return us == Character.UnicodeScript.HAN
+                        || us == Character.UnicodeScript.HIRAGANA
+                        || us == Character.UnicodeScript.KATAKANA;
             case "Korean":
-                return block == Character.UnicodeBlock.HANGUL_SYLLABLES
-                        || block == Character.UnicodeBlock.HANGUL_JAMO
-                        || block == Character.UnicodeBlock.HANGUL_COMPATIBILITY_JAMO;
+                return us == Character.UnicodeScript.HANGUL;
             case "Devanagari":
-                // DEVANAGARI + Extended (huruf tambahan yang kadang muncul
-                // di teks Hindi/Nepali modern). Extended tersedia sejak
-                // API 19; null-safe lewat try/catch tidak perlu karena
-                // konstanta ada di semua API yang kita target.
-                return block == Character.UnicodeBlock.DEVANAGARI
-                        || block == Character.UnicodeBlock.DEVANAGARI_EXTENDED;
+                return us == Character.UnicodeScript.DEVANAGARI;
             case "Arabic":
-                return block == Character.UnicodeBlock.ARABIC
-                        || block == Character.UnicodeBlock.ARABIC_SUPPLEMENT
-                        || block == Character.UnicodeBlock.ARABIC_PRESENTATION_FORMS_A
-                        || block == Character.UnicodeBlock.ARABIC_PRESENTATION_FORMS_B;
+                return us == Character.UnicodeScript.ARABIC;
             case "Thai":
-                return block == Character.UnicodeBlock.THAI;
+                return us == Character.UnicodeScript.THAI;
             default:
                 return true;
         }
     }
 
-    /** Skor sederhana: jumlah karakter dari blok yang lolos filter tinggi/panjang. */
+    /** @deprecated diganti isCodePointInScript; dipertahankan agar kompilasi aman bila ada referensi sisa. */
+    private static boolean isCharInScript(char c, String scriptName) {
+        return isCodePointInScript(c, scriptName);
+    }
+
+        /** Skor sederhana: jumlah karakter dari blok yang lolos filter tinggi/panjang. */
     private static int scoreOcrBlocks(List<OcrBlock> blocks) {
         int score = 0;
         for (OcrBlock block : blocks) {

@@ -130,10 +130,10 @@ public final class TesseractArabicRecognizer {
                     float conf = iterator.confidence(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                     // Filter baris confidence rendah: Tesseract sering "hallucinate"
                     // teks skrip yang diminta pada gambar non-Arab (garis/noise
-                    // dibaca sebagai huruf Arab acak). Ambang 55 membuang
+                    // dibaca sebagai huruf Arab acak). Ambang 40 membuang
                     // kebanyakan sampah tanpa membuang teks Arab yang agak
                     // blur/kecil di screenshot.
-                    if (lineText != null && !lineText.trim().isEmpty() && box != null && conf >= 55.0f) {
+                    if (lineText != null && !lineText.trim().isEmpty() && box != null && conf >= 40.0f) {
                         result.add(new OcrBlock(lineText.trim(), box));
                     }
                 } while (iterator.next(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE));

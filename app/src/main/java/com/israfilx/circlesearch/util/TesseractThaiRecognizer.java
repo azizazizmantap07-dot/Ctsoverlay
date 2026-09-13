@@ -130,10 +130,10 @@ public final class TesseractThaiRecognizer {
                     Rect box = iterator.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                     float conf = iterator.confidence(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                     // Filter baris confidence rendah: Tesseract sering "hallucinate"
-                    // teks skrip yang diminta pada gambar non-Thai. Ambang 55
+                    // teks skrip yang diminta pada gambar non-Thai. Ambang 40
                     // membuang kebanyakan sampah tanpa membuang teks Thai yang
                     // agak blur/kecil di screenshot.
-                    if (lineText != null && !lineText.trim().isEmpty() && box != null && conf >= 55.0f) {
+                    if (lineText != null && !lineText.trim().isEmpty() && box != null && conf >= 40.0f) {
                         result.add(new OcrBlock(lineText.trim(), box));
                     }
                 } while (iterator.next(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE));
