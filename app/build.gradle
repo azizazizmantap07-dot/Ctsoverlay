@@ -10,8 +10,8 @@ android {
         applicationId "com.israfilx.circlesearch"
         minSdk 26
         targetSdk 34
-        versionCode 26
-        versionName "1.9.5"
+        versionCode 27
+        versionName "1.9.6"
     }
 
     // Dibaca dari properti -P yang diinjeksikan workflow build-release.yml
@@ -27,12 +27,41 @@ android {
                 keyPassword project.findProperty('android.injected.signing.key.password')
             }
         }
+        // Keystore debug TETAP, di-commit ke repo (keystore/debug_keystore.dat).
+        //
+        // MASALAH SEBELUM INI: assembleDebug tanpa signingConfig eksplisit
+        // memakai keystore debug AUTO-GENERATE Gradle/Android SDK di tiap
+        // environment (~/.android/debug.keystore). Karena tiap build APK
+        // debug lewat GitHub Actions jalan di runner/environment yang bisa
+        // berbeda-beda, keystore auto-generate ini TIDAK KONSISTEN antar
+        // build — signature APK debug berubah dari satu build ke build
+        // berikutnya. Akibatnya install APK baru di atas APK lama gagal
+        // dengan "INSTALL_FAILED_UPDATE_INCOMPATIBLE / tidak konsisten
+        // dengan tanda tangan APK yang diinstal", memaksa uninstall
+        // manual tiap kali — yang MENGHAPUS model bahasa ML Kit yang
+        // sudah diunduh (tersimpan di data privat app) dan bikin harus
+        // download ulang tiap sesi debug.
+        //
+        // Dengan keystore debug tetap di-commit dan dipakai eksplisit di
+        // sini, signature APK debug SELALU SAMA di semua build & semua
+        // runner — install baru di atas versi lama selalu dianggap
+        // "update" oleh Android (data & model ML Kit tetap ada), selama
+        // versionCode tidak diturunkan.
+        debug {
+            storeFile file('../keystore/debug_keystore.dat')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
             signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.debug
         }
     }
 

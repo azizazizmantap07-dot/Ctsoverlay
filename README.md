@@ -38,9 +38,32 @@ manual — cukup push ke GitHub dan Actions akan build otomatis.
 3. Setelah selesai, unduh APK dari bagian **Artifacts** pada run tersebut
    (nama artifact: `CircleSearchOverlay-debug-apk`).
 
-APK debug ini ditandatangani otomatis dengan debug keystore bawaan Gradle —
-cukup untuk instal & testing langsung di device, tidak perlu setup
-tambahan.
+APK debug ini ditandatangani dengan keystore debug TETAP yang di-commit
+di `keystore/debug_keystore.dat` (lihat bagian **Keystore debug tetap**
+di bawah) — signature-nya sama di semua build, jadi APK baru selalu bisa
+dipasang sebagai *update* di atas APK lama tanpa perlu uninstall dulu.
+
+### Keystore debug tetap (`keystore/debug_keystore.dat`)
+
+File ini BUKAN keystore rahasia — sengaja di-commit ke repo, dengan
+password & alias standar Android debug keystore (`android` / `android` /
+`androiddebugkey`), sama seperti debug keystore bawaan Android Studio.
+
+**Kenapa ini perlu:** tanpa keystore tetap, `assembleDebug` memakai
+keystore auto-generate Gradle yang lokasinya beda-beda tiap environment
+(termasuk tiap runner GitHub Actions) — signature APK debug jadi berubah
+tiap build, sehingga install APK baru di atas versi lama selalu gagal
+dengan "tidak konsisten dengan tanda tangan APK yang diinstal", memaksa
+uninstall manual tiap kali (dan itu menghapus data app, termasuk model
+bahasa ML Kit yang sudah diunduh).
+
+**Jangan hapus atau regenerate file ini** kecuali sengaja ingin
+memutus kompatibilitas dengan semua APK debug yang sudah pernah dipasang
+sebelumnya (device lama harus uninstall dulu setelah keystore diganti).
+
+**Berbeda dengan larangan di bawah** (`.jks` untuk release): larangan
+itu untuk keystore RELEASE (rahasia, sesuai identitas developer asli),
+bukan untuk keystore debug ini (publik, cuma untuk konsistensi testing).
 
 ### APK Release (signed, manual, opsional)
 Hanya perlu jika ingin distribusi APK yang ditandatangani dengan keystore
