@@ -483,19 +483,26 @@ public final class OcrTranslateHelper {
         int bestScore = -1;
         String bestScript = "none";
         // Track kandidat ML Kit terbaik (Latin/CJK/Korean/Devanagari) terpisah
-        // agar bisa "menyelamatkan" hasil dari hallucinasi Tesseract Thai/Arabic
-        // yang lolos filter purity karena output-nya memang huruf Thai/Arab acak.
+        // untuk anti-hallucination Thai saja.
         List<OcrBlock> bestMlKitBlocks = Collections.emptyList();
         int bestMlKitScore = -1;
         String bestMlKitScript = "none";
+        // Track Cyrillic & Arabic terbaik: Latin sering "salah baca" teks
+        // Cyrillic/Arab jadi sampah Latin panjang ber-skor tinggi, sehingga
+        // Rusia/Ukraina/Arab kalah. Simpan kandidat murni untuk override.
+        List<OcrBlock> bestCyrillicBlocks = Collections.emptyList();
+        int bestCyrillicScore = -1;
+        double bestCyrillicPurity = 0;
+        List<OcrBlock> bestArabicBlocks = Collections.emptyList();
+        int bestArabicScore = -1;
+        double bestArabicPurity = 0;
         for (int i = 0; i < results.length; i++) {
             List<OcrBlock> blocks = results[i];
             if (blocks == null || blocks.isEmpty()) continue;
             String script = scriptNames[i];
             // Latin selalu dianggap valid tanpa validasi rentang Unicode
             // (dipakai juga untuk bahasa berdiakritik). Semua skrip
-            // lainnya, TERMASUK Arabic dan Thai (hasil Tesseract),
-            // divalidasi dominasi karakter.
+            // lainnya divalidasi dominasi karakter.
             if (!"Latin".equals(script) && !isScriptTextValid(blocks, script)) {
                 Log.d(TAG, "OCR " + script + " dibuang: teks tidak didominasi karakter skrip " + script + " (kemungkinan salah-baca skrip lain)");
                 continue;
@@ -509,6 +516,16 @@ public final class OcrTranslateHelper {
                 bestMlKitBlocks = blocks;
                 bestMlKitScript = script;
             }
+            if ("Cyrillic".equals(script) && score > bestCyrillicScore) {
+                bestCyrillicScore = score;
+                bestCyrillicBlocks = blocks;
+                bestCyrillicPurity = purity;
+            }
+            if ("Arabic".equals(script) && score > bestArabicScore) {
+                bestArabicScore = score;
+                bestArabicBlocks = blocks;
+                bestArabicPurity = purity;
+            }
             if (score > bestScore) {
                 bestScore = score;
                 bestBlocks = blocks;
@@ -516,20 +533,53 @@ public final class OcrTranslateHelper {
             }
         }
 
-        // Anti-hallucination: jika pemenang adalah Thai/Arabic (Tesseract)
-        // tapi ada kandidat ML Kit yang skornya >= 40% pemenang, prefer ML Kit.
-        // Hallucinasi Tesseract sering menghasilkan skor sangat tinggi (banyak
-        // huruf acak) pada teks Latin/CJK/Devanagari — ML Kit jauh lebih andal
-        // untuk skrip-skrip itu.
-        if (("Thai".equals(bestScript) || "Arabic".equals(bestScript) || "Cyrillic".equals(bestScript))
+        // Anti-hallucination HANYA untuk Thai (pelaku utama hallucinasi volume
+        // tinggi pada teks Latin/CJK). Cyrillic & Arabic JANGAN digeser oleh
+        // Latin — Latin sering menghasilkan sampah panjang dari teks Cyrillic/
+        // Arab asli, yang justru membuat Rusia/Ukraina/Arab gagal terdeteksi.
+        if ("Thai".equals(bestScript)
                 && bestMlKitScore > 0
                 && bestMlKitScore >= bestScore * 0.40) {
-            Log.d(TAG, "OCR " + bestScript + " (skor=" + bestScore
+            Log.d(TAG, "OCR Thai (skor=" + bestScore
                     + ") digeser oleh ML Kit " + bestMlKitScript
                     + " (skor=" + bestMlKitScore + ") anti-hallucination");
             bestBlocks = bestMlKitBlocks;
             bestScore = bestMlKitScore;
             bestScript = bestMlKitScript;
+        }
+
+        // Prefer Cyrillic murni atas Latin: jika Cyrillic purity tinggi dan
+        // skornya minimal 30% dari Latin (atau Latin yang menang), pilih Cyrillic.
+        // Kasus nyata: teks Rusia → Latin skor 1096 (sampah), Cyrillic 20 blok
+        // purity 100% tapi kalah di skor karakter.
+        if (bestCyrillicScore > 0 && bestCyrillicPurity >= 0.80
+                && ("Latin".equals(bestScript) || bestCyrillicScore >= bestScore * 0.30)) {
+            if (!"Cyrillic".equals(bestScript)) {
+                Log.d(TAG, "OCR " + bestScript + " (skor=" + bestScore
+                        + ") digeser oleh Cyrillic (skor=" + bestCyrillicScore
+                        + ", purity=" + String.format("%.0f", bestCyrillicPurity * 100)
+                        + "%) prefer-script");
+            }
+            bestBlocks = bestCyrillicBlocks;
+            bestScore = bestCyrillicScore;
+            bestScript = "Cyrillic";
+        }
+
+        // Prefer Arabic murni atas Latin (alasan sama seperti Cyrillic).
+        if (bestArabicScore > 0 && bestArabicPurity >= 0.80
+                && ("Latin".equals(bestScript) || bestArabicScore >= bestScore * 0.30)) {
+            // Jangan override Cyrillic yang baru saja dipilih kecuali Arabic jauh lebih kuat
+            if ("Cyrillic".equals(bestScript) && bestArabicScore < bestCyrillicScore * 1.2) {
+                // biarkan Cyrillic
+            } else if (!"Arabic".equals(bestScript)) {
+                Log.d(TAG, "OCR " + bestScript + " (skor=" + bestScore
+                        + ") digeser oleh Arabic (skor=" + bestArabicScore
+                        + ", purity=" + String.format("%.0f", bestArabicPurity * 100)
+                        + "%) prefer-script");
+                bestBlocks = bestArabicBlocks;
+                bestScore = bestArabicScore;
+                bestScript = "Arabic";
+            }
         }
 
         if (bestBlocks.isEmpty() || bestScore <= 0) {
