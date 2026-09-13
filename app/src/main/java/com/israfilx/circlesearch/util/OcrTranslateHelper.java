@@ -461,6 +461,12 @@ public final class OcrTranslateHelper {
         List<OcrBlock> bestBlocks = Collections.emptyList();
         int bestScore = -1;
         String bestScript = "none";
+        // Track kandidat ML Kit terbaik (Latin/CJK/Korean/Devanagari) terpisah
+        // agar bisa "menyelamatkan" hasil dari hallucinasi Tesseract Thai/Arabic
+        // yang lolos filter purity karena output-nya memang huruf Thai/Arab acak.
+        List<OcrBlock> bestMlKitBlocks = Collections.emptyList();
+        int bestMlKitScore = -1;
+        String bestMlKitScript = "none";
         for (int i = 0; i < results.length; i++) {
             List<OcrBlock> blocks = results[i];
             if (blocks == null || blocks.isEmpty()) continue;
@@ -468,26 +474,41 @@ public final class OcrTranslateHelper {
             // Latin selalu dianggap valid tanpa validasi rentang Unicode
             // (dipakai juga untuk bahasa berdiakritik). Semua skrip
             // lainnya, TERMASUK Arabic dan Thai (hasil Tesseract),
-            // divalidasi dominasi karakter — lihat isCharInScript untuk
-            // rentang Unicode Arabic/Thai yang ditambahkan bersamaan
-            // dengan fitur ini.
+            // divalidasi dominasi karakter.
             if (!"Latin".equals(script) && !isScriptTextValid(blocks, script)) {
                 Log.d(TAG, "OCR " + script + " dibuang: teks tidak didominasi karakter skrip " + script + " (kemungkinan salah-baca skrip lain)");
                 continue;
             }
             int rawScore = scoreOcrBlocks(blocks);
-            // Bobot skor dengan kemurnian skrip (purity). Latin dianggap
-            // purity 1.0. Skrip lain dihitung rasio karakter skrip /
-            // non-spasi. Ini membuat hasil "hampir murni" unggul atas
-            // hasil panjang tapi campur-aduk (hallucination Tesseract/
-            // ML Kit) yang lolos ambang 55%.
             double purity = "Latin".equals(script) ? 1.0 : scriptPurity(blocks, script);
             int score = (int) Math.round(rawScore * (0.5 + 0.5 * purity));
+            boolean isTesseract = "Arabic".equals(script) || "Thai".equals(script);
+            if (!isTesseract && score > bestMlKitScore) {
+                bestMlKitScore = score;
+                bestMlKitBlocks = blocks;
+                bestMlKitScript = script;
+            }
             if (score > bestScore) {
                 bestScore = score;
                 bestBlocks = blocks;
                 bestScript = script;
             }
+        }
+
+        // Anti-hallucination: jika pemenang adalah Thai/Arabic (Tesseract)
+        // tapi ada kandidat ML Kit yang skornya >= 40% pemenang, prefer ML Kit.
+        // Hallucinasi Tesseract sering menghasilkan skor sangat tinggi (banyak
+        // huruf acak) pada teks Latin/CJK/Devanagari — ML Kit jauh lebih andal
+        // untuk skrip-skrip itu.
+        if (("Thai".equals(bestScript) || "Arabic".equals(bestScript))
+                && bestMlKitScore > 0
+                && bestMlKitScore >= bestScore * 0.40) {
+            Log.d(TAG, "OCR " + bestScript + " (skor=" + bestScore
+                    + ") digeser oleh ML Kit " + bestMlKitScript
+                    + " (skor=" + bestMlKitScore + ") anti-hallucination");
+            bestBlocks = bestMlKitBlocks;
+            bestScore = bestMlKitScore;
+            bestScript = bestMlKitScript;
         }
 
         if (bestBlocks.isEmpty() || bestScore <= 0) {
@@ -533,13 +554,17 @@ public final class OcrTranslateHelper {
             }
         }
         if (totalLetters == 0) return false;
-        // Lolos jika rasio huruf skrip >= 35% ATAU ada cukup banyak huruf skrip
-        // absolut (frasa pendek seperti "مرحبا" / "สวัสดี" / "नमस्ते").
-        boolean ok = scriptLetters >= totalLetters * 0.35 || scriptLetters >= 6;
-        if (!ok) {
-            Log.d(TAG, "OCR " + scriptName + " purity=" + scriptLetters + "/" + totalLetters
-                    + " (" + (totalLetters == 0 ? 0 : (scriptLetters * 100 / totalLetters)) + "%)");
-        }
+        // Arabic & Thai (Tesseract) sering hallucinate huruf skrip murni pada
+        // gambar non-skrip. Ambang lebih ketat: 55% huruf skrip + minimal 8
+        // huruf. Skrip ML Kit tetap 35% / min 6 (lebih toleran).
+        boolean isTesseractScript = "Arabic".equals(scriptName) || "Thai".equals(scriptName);
+        double minRatio = isTesseractScript ? 0.55 : 0.35;
+        int minAbs = isTesseractScript ? 8 : 6;
+        boolean ok = scriptLetters >= totalLetters * minRatio || scriptLetters >= minAbs;
+        // Selalu log purity agar debuggable
+        Log.d(TAG, "OCR " + scriptName + " purity=" + scriptLetters + "/" + totalLetters
+                + " (" + (scriptLetters * 100 / totalLetters) + "%)"
+                + (ok ? " OK" : " DIBUANG"));
         return ok;
     }
 

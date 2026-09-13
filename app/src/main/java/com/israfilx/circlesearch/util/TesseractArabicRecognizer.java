@@ -116,28 +116,44 @@ public final class TesseractArabicRecognizer {
             }
 
             tessApi.setImage(bitmap);
-            // Memicu layout analysis + recognition; hasil teks penuh tidak
-            // dipakai langsung (kita ambil per-baris lewat ResultIterator
-            // agar dapat boundingBox per blok, konsisten dengan ML Kit).
+            // PSM_AUTO (3): biarkan Tesseract deteksi layout. Jangan pakai
+            // mode agresif yang cenderung "mengisi" halaman dengan huruf acak.
+            tessApi.setPageSegMode(3); // PSM_AUTO
             tessApi.getUTF8Text();
 
             ResultIterator iterator = tessApi.getResultIterator();
             if (iterator != null) {
                 iterator.begin();
+                float confSum = 0f;
+                int confCount = 0;
                 do {
                     String lineText = iterator.getUTF8Text(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                     Rect box = iterator.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                     float conf = iterator.confidence(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
-                    // Filter baris confidence rendah: Tesseract sering "hallucinate"
-                    // teks skrip yang diminta pada gambar non-Arab (garis/noise
-                    // dibaca sebagai huruf Arab acak). Ambang 40 membuang
-                    // kebanyakan sampah tanpa membuang teks Arab yang agak
-                    // blur/kecil di screenshot.
-                    if (lineText != null && !lineText.trim().isEmpty() && box != null && conf >= 40.0f) {
+                    // Ambang 70: hasil hallucinasi pada gambar non-skrip biasanya
+                    // confidence-nya rendah-sedang. Teks asli yang jelas biasanya >75.
+                    if (lineText != null && !lineText.trim().isEmpty() && box != null && conf >= 70.0f) {
                         result.add(new OcrBlock(lineText.trim(), box));
+                        confSum += conf;
+                        confCount++;
                     }
                 } while (iterator.next(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE));
                 iterator.delete();
+
+                // Tolak SELURUH hasil bila rata-rata confidence rendah atau
+                // terlalu sedikit baris — indikasi kuat hallucinasi.
+                if (confCount > 0) {
+                    float avgConf = confSum / confCount;
+                    if (avgConf < 75.0f || confCount < 1) {
+                        Log.d(TAG, "OCR Arabic (Tesseract) dibuang: avgConf="
+                                + String.format("%.1f", avgConf) + " baris=" + confCount
+                                + " (kemungkinan hallucinasi)");
+                        result.clear();
+                    } else {
+                        Log.d(TAG, "OCR Arabic (Tesseract) avgConf="
+                                + String.format("%.1f", avgConf) + " baris=" + confCount);
+                    }
+                }
             }
         } catch (Exception e) {
             Log.w(TAG, "OCR Tesseract Arabic gagal: " + e.getMessage());
