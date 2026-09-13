@@ -81,6 +81,47 @@ public final class OcrTranslateHelper {
     public static final String TARGET_LANGUAGE = TranslateLanguage.INDONESIAN;
 
     /**
+     * Peta alias kode BCP-47 dari LanguageIdentifier ke kode konstanta
+     * TranslateLanguage, untuk kasus di mana keduanya BUKAN string yang
+     * sama persis.
+     *
+     * DITAMBAHKAN setelah ditemukan di device asli bahwa
+     * TranslateLanguage.fromLanguageTag("fil") mengembalikan NULL,
+     * bertentangan dengan dokumentasi resmi Google yang menyarankan
+     * fromLanguageTag() untuk konversi ini. Rupanya fromLanguageTag()
+     * hanya cocok untuk tag yang PERSIS sama dengan salah satu konstanta
+     * TranslateLanguage (mis. "tl" cocok karena TranslateLanguage.TAGALOG
+     * = "tl"), bukan untuk semua alias BCP-47 yang merujuk bahasa yang
+     * sama (mis. "fil" adalah alias/kode ISO 639-2 untuk Filipino yang
+     * dipakai LanguageIdentifier, sedangkan Translate API memakai kode
+     * makro-bahasa "tl").
+     *
+     * Tambahkan entri baru di sini bila di masa depan ditemukan bahasa
+     * lain dengan pola serupa (LanguageIdentifier mengembalikan kode yang
+     * fromLanguageTag() tidak kenali padahal bahasanya didukung Translate
+     * API) — cek dulu apakah kode itu sebenarnya benar-benar tidak
+     * didukung, atau cuma alias yang belum dipetakan.
+     */
+    private static final java.util.Map<String, String> LANGUAGE_CODE_ALIASES = new java.util.HashMap<>();
+    static {
+        LANGUAGE_CODE_ALIASES.put("fil", TranslateLanguage.TAGALOG); // Filipino -> "tl"
+    }
+
+    /**
+     * Normalisasi kode BCP-47 mentah dari LanguageIdentifier ke kode
+     * konstanta TranslateLanguage yang benar. Coba alias eksplisit dulu
+     * (untuk kasus yang terbukti tidak dikenali fromLanguageTag()), baru
+     * fromLanguageTag() sebagai fallback umum untuk kode lain.
+     * Null bila memang tidak didukung Translate API sama sekali.
+     */
+    private static String normalizeToTranslateLanguage(String rawLanguageCode) {
+        if (rawLanguageCode == null) return null;
+        String aliased = LANGUAGE_CODE_ALIASES.get(rawLanguageCode);
+        if (aliased != null) return aliased;
+        return TranslateLanguage.fromLanguageTag(rawLanguageCode);
+    }
+
+    /**
      * Daftar bahasa sumber yang didukung untuk diunduh manual.
      * Model Translate ML Kit bersifat per-bahasa (bukan per-pasangan);
      * model bahasa X + model bahasa target (Indonesia) memungkinkan
@@ -305,17 +346,39 @@ public final class OcrTranslateHelper {
         // Pilih hasil dengan skor tertinggi: total karakter signifikan
         // (tinggi blok + panjang teks). Prefer hasil yang punya lebih banyak
         // konten nyata daripada hanya noise status-bar.
+        //
+        // PERBAIKAN BUG — OCR recognizer non-Latin (Chinese/Japanese/Korean/
+        // Devanagari) kadang "salah baca" teks skrip LAIN (mis. teks Korean
+        // asli) sebagai coretan skripnya sendiri dan menghasilkan string
+        // yang secara KEBETULAN lebih panjang daripada hasil recognizer
+        // yang sebenarnya benar (mis. recognizer Korean). Skor lama yang
+        // murni "jumlah karakter" membuat hasil salah-baca ini menang,
+        // sehingga bahasa yang terdeteksi belakangan jadi ngawur (lihat
+        // kasus nyata: teks Korea terbaca sebagai skrip Devanagari,
+        // menghasilkan deteksi bahasa "fil"/"ig"/"et" yang berubah-ubah).
+        //
+        // Perbaikan: untuk recognizer NON-LATIN, hasilnya HANYA dianggap
+        // valid (skor dihitung) bila teksnya benar-benar didominasi
+        // karakter dari rentang Unicode skrip tersebut (lihat
+        // isScriptTextValid). Recognizer Latin selalu dianggap valid
+        // (dipakai juga untuk bahasa berdiakritik seperti Vietnamese, jadi
+        // tidak bisa divalidasi rentang Unicode secara ketat).
         List<Text.TextBlock> bestBlocks = Collections.emptyList();
         int bestScore = -1;
         String bestScript = "none";
         for (int i = 0; i < results.length; i++) {
             List<Text.TextBlock> blocks = results[i];
             if (blocks == null || blocks.isEmpty()) continue;
+            String script = scriptNames[i];
+            if (!"Latin".equals(script) && !isScriptTextValid(blocks, script)) {
+                Log.d(TAG, "OCR " + script + " dibuang: teks tidak didominasi karakter skrip " + script + " (kemungkinan salah-baca skrip lain)");
+                continue;
+            }
             int score = scoreOcrBlocks(blocks);
             if (score > bestScore) {
                 bestScore = score;
                 bestBlocks = blocks;
-                bestScript = new String[]{"Latin", "Chinese", "Japanese", "Korean", "Devanagari"}[i];
+                bestScript = script;
             }
         }
 
@@ -333,6 +396,60 @@ public final class OcrTranslateHelper {
             return;
         }
         detectLanguageAndTranslateBlocks(bestBlocks, callback, generation);
+    }
+
+    /**
+     * True bila gabungan teks dari blok-blok ini didominasi (>= 40%)
+     * karakter dari rentang Unicode yang sesuai dengan nama skrip yang
+     * diberikan. Dipakai untuk memvalidasi hasil recognizer non-Latin
+     * (Chinese/Japanese/Korean/Devanagari) agar tidak "asal menang" saat
+     * sebenarnya salah membaca skrip lain sebagai skripnya sendiri.
+     *
+     * Ambang 40% (bukan >50%) sengaja dilonggarkan karena satu blok teks
+     * dunia nyata sering bercampur dengan angka/tanda baca/spasi/label
+     * Latin (mis. merk, angka versi) di antara karakter skrip aslinya.
+     */
+    private static boolean isScriptTextValid(List<Text.TextBlock> blocks, String scriptName) {
+        int scriptChars = 0;
+        int totalNonSpace = 0;
+        for (Text.TextBlock block : blocks) {
+            String text = block.getText();
+            if (text == null) continue;
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                if (Character.isWhitespace(c)) continue;
+                totalNonSpace++;
+                if (isCharInScript(c, scriptName)) scriptChars++;
+            }
+        }
+        if (totalNonSpace == 0) return false;
+        return scriptChars >= totalNonSpace * 0.4;
+    }
+
+    /** Cek apakah satu karakter berada di rentang Unicode skrip yang disebut. */
+    private static boolean isCharInScript(char c, String scriptName) {
+        Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
+        if (block == null) return false;
+        switch (scriptName) {
+            case "Chinese":
+                return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
+                        || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
+                        || block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION;
+            case "Japanese":
+                return block == Character.UnicodeBlock.HIRAGANA
+                        || block == Character.UnicodeBlock.KATAKANA
+                        || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
+                        || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
+                        || block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION;
+            case "Korean":
+                return block == Character.UnicodeBlock.HANGUL_SYLLABLES
+                        || block == Character.UnicodeBlock.HANGUL_JAMO
+                        || block == Character.UnicodeBlock.HANGUL_COMPATIBILITY_JAMO;
+            case "Devanagari":
+                return block == Character.UnicodeBlock.DEVANAGARI;
+            default:
+                return true;
+        }
     }
 
     /** Skor sederhana: jumlah karakter dari blok yang lolos filter tinggi/panjang. */
@@ -540,13 +657,13 @@ public final class OcrTranslateHelper {
     /**
      * Bandingkan kode bahasa hasil LanguageIdentifier (tag BCP-47 mentah,
      * mis. "fil") dengan {@link #TARGET_LANGUAGE} secara aman — keduanya
-     * dinormalisasi lewat {@link TranslateLanguage#fromLanguageTag} dulu
+     * dinormalisasi lewat {@link #normalizeToTranslateLanguage} dulu
      * karena tag mentah tidak selalu sama persis dengan kode konstanta
-     * TranslateLanguage (lihat catatan mismatch di
-     * {@link #translateBlocksIfModelAvailable}).
+     * TranslateLanguage (lihat catatan mismatch & alias di
+     * {@link #normalizeToTranslateLanguage}).
      */
     private static boolean isTargetLanguage(String rawLanguageCode) {
-        String normalized = TranslateLanguage.fromLanguageTag(rawLanguageCode);
+        String normalized = normalizeToTranslateLanguage(rawLanguageCode);
         return TARGET_LANGUAGE.equals(normalized);
     }
 
@@ -625,12 +742,15 @@ public final class OcrTranslateHelper {
         // dicek pakai kode mentah "fil" hasil deteksi -> selalu dianggap
         // "belum diunduh" walau sudah ada.
         //
-        // TranslateLanguage.fromLanguageTag() menerjemahkan tag BCP-47
-        // (termasuk kasus seperti "fil"->"tl") ke kode konstanta yang benar
-        // untuk API translate. Semua downstream (isModelDownloaded,
-        // downloadModel, TranslatorOptions) HARUS pakai kode hasil
-        // normalisasi ini, bukan kode mentah dari language-id.
-        String normalized = TranslateLanguage.fromLanguageTag(sourceLanguageCode);
+        // CATATAN LANJUTAN (setelah verifikasi di device asli): dokumentasi
+        // Google menyarankan TranslateLanguage.fromLanguageTag() untuk
+        // konversi "fil"->"tl", TAPI di device asli terbukti
+        // fromLanguageTag("fil") mengembalikan NULL, bukan "tl". Karena itu
+        // normalisasi TIDAK bergantung 100% pada fromLanguageTag() saja —
+        // lihat {@link #normalizeToTranslateLanguage} yang cek alias
+        // eksplisit (LANGUAGE_CODE_ALIASES) lebih dulu, baru fallback ke
+        // fromLanguageTag() untuk kode lain yang match langsung.
+        String normalized = normalizeToTranslateLanguage(sourceLanguageCode);
         if (normalized == null) {
             // Bahasa terdeteksi tapi tidak didukung sama sekali oleh
             // Translate API (beda dengan "belum diunduh") -> tampilkan asli.
