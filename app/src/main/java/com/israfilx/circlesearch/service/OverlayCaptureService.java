@@ -549,7 +549,7 @@ public class OverlayCaptureService extends Service {
         }
 
         showLoadingStatus(true, "Membaca teks…");
-        OcrTranslateHelper.recognizeTextOnly(ocrBitmap, new OcrTranslateHelper.ResultCallback() {
+        OcrTranslateHelper.recognizeTextOnly(this, ocrBitmap, new OcrTranslateHelper.ResultCallback() {
             @Override
             public void onSuccess(List<OcrTranslateHelper.TranslatedBlock> blocks) {
                 mainHandler.post(() -> {
@@ -641,7 +641,7 @@ public class OverlayCaptureService extends Service {
     private void runOcrAndTranslateOnBitmap(Bitmap bitmap, int offsetX, int offsetY) {
         showLoadingStatus(true, "Membaca teks…");
 
-        OcrTranslateHelper.recognizeAndTranslate(bitmap, new OcrTranslateHelper.ResultCallback() {
+        OcrTranslateHelper.recognizeAndTranslate(this, bitmap, new OcrTranslateHelper.ResultCallback() {
             @Override
             public void onModelNotDownloaded(String sourceLanguageCode) {
                 mainHandler.post(() -> Toast.makeText(OverlayCaptureService.this,

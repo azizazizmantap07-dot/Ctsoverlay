@@ -1,5 +1,6 @@
 package com.israfilx.circlesearch.util;
 
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.util.Log;
@@ -37,12 +38,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * OCR (ekstraksi teks dari gambar) dan translate, keduanya via ML Kit
- * on-device.
+ * OCR (ekstraksi teks dari gambar) dan translate, keduanya on-device.
+ * OCR memakai ML Kit Text Recognition untuk skrip Latin/Chinese/Japanese/
+ * Korean/Devanagari, DITAMBAH Tesseract ({@link TesseractArabicRecognizer}
+ * dan {@link TesseractThaiRecognizer}) khusus untuk skrip Arabic dan Thai
+ * — ML Kit tidak menyediakan recognizer untuk kedua skrip itu sama sekali.
+ * Translate tetap sepenuhnya ML Kit untuk semua bahasa.
  *
  * Alur: OCR baca teks dari bitmap crop -> pisah per BLOK teks (paragraf/
- * baris yang dikelompokkan ML Kit, lengkap dengan boundingBox-nya) ->
- * saring blok "noise" yang terlalu kecil/tidak relevan (lihat
+ * baris yang dikelompokkan recognizer, lengkap dengan boundingBox-nya,
+ * dinormalisasi ke {@link OcrBlock} agar netral terhadap library OCR
+ * asalnya) -> saring blok "noise" yang terlalu kecil/tidak relevan (lihat
  * {@link #filterSignificantBlocks}) -> deteksi bahasa dari gabungan blok
  * yang tersisa (sekali saja, lebih akurat daripada per-blok) -> translate
  * SETIAP blok secara terpisah.
@@ -251,35 +257,52 @@ public final class OcrTranslateHelper {
     private OcrTranslateHelper() {}
 
     /** Jalankan OCR + translate ke {@link #TARGET_LANGUAGE}. */
-    public static void recognizeAndTranslate(Bitmap bitmap, ResultCallback callback) {
-        recognizeInternal(bitmap, callback, true);
+    public static void recognizeAndTranslate(Context context, Bitmap bitmap, ResultCallback callback) {
+        recognizeInternal(context, bitmap, callback, true);
     }
 
     /**
      * Jalankan OCR SAJA tanpa translate sama sekali — dipakai untuk fitur
      * "Salin Teks".
      */
-    public static void recognizeTextOnly(Bitmap bitmap, ResultCallback callback) {
-        recognizeInternal(bitmap, callback, false);
+    public static void recognizeTextOnly(Context context, Bitmap bitmap, ResultCallback callback) {
+        recognizeInternal(context, bitmap, callback, false);
     }
 
     /**
+     * Executor khusus untuk recognizer Tesseract (Arabic) — TessBaseAPI
+     * bersifat blocking/sinkron (bukan Task-based seperti ML Kit), jadi
+     * harus dijalankan di thread terpisah agar tetap paralel dengan
+     * recognizer ML Kit lainnya alih-alih menunggu berurutan.
+     */
+    private static final java.util.concurrent.ExecutorService TESSERACT_EXECUTOR =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+    private static final android.os.Handler MAIN_HANDLER =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+
+    /**
      * OCR multi-skrip: jalankan Latin + Chinese + Japanese + Korean + Devanagari
-     * secara paralel, lalu pilih hasil terbaik (paling banyak karakter signifikan).
-     * Ini memperbaiki deteksi teks non-Latin (Cina, Jepang, Korea, Hindi, dll)
+     * (ML Kit) + Arabic + Thai (keduanya Tesseract) secara paralel, lalu pilih
+     * hasil terbaik (paling banyak karakter signifikan). Ini memperbaiki
+     * deteksi teks non-Latin (Cina, Jepang, Korea, Hindi, Arab, Thai, dll)
      * yang sebelumnya gagal karena hanya memakai TextRecognizer Latin.
      *
-     * Catatan: Arab & Thai tidak punya model on-device gratis di ML Kit Text
-     * Recognition saat ini — untuk bahasa tersebut OCR Latin biasanya gagal /
-     * kosong. Vietnamese memakai aksara Latin (dengan diakritik) jadi seharusnya
-     * terdeteksi oleh recognizer Latin.
+     * Catatan: Arab dan Thai SUDAH ditangani lewat
+     * {@link TesseractArabicRecognizer} dan {@link TesseractThaiRecognizer}
+     * karena ML Kit tidak menyediakan recognizer on-device untuk kedua
+     * skrip itu sama sekali. Vietnamese memakai aksara Latin (dengan
+     * diakritik) jadi seharusnya terdeteksi oleh recognizer Latin.
      */
-    private static void recognizeInternal(Bitmap bitmap, ResultCallback callback, boolean alsoTranslate) {
+    private static void recognizeInternal(Context context, Bitmap bitmap, ResultCallback callback, boolean alsoTranslate) {
+        final Context appContext = context.getApplicationContext();
         final long myGeneration = requestGeneration.incrementAndGet();
         final InputImage image = InputImage.fromBitmap(bitmap, 0);
 
-        // Daftar recognizer multi-skrip (Latin selalu dijalankan; lainnya untuk
-        // skrip non-Latin). Semua dijalankan paralel, hasil terbaik dipilih.
+        // Daftar recognizer ML Kit multi-skrip (Latin selalu dijalankan;
+        // lainnya untuk skrip non-Latin). Semua dijalankan paralel, hasil
+        // terbaik dipilih. Arabic dan Thai (Tesseract) DITAMBAHKAN sebagai
+        // dua slot terakhir array hasil (lihat totalRecognizers di bawah)
+        // — bukan TextRecognizer ML Kit, jadi dijalankan lewat jalur terpisah.
         final TextRecognizer[] recognizers = new TextRecognizer[] {
                 TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS),
                 TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build()),
@@ -287,10 +310,11 @@ public final class OcrTranslateHelper {
                 TextRecognition.getClient(new KoreanTextRecognizerOptions.Builder().build()),
                 TextRecognition.getClient(new DevanagariTextRecognizerOptions.Builder().build())
         };
-        final String[] scriptNames = {"Latin", "Chinese", "Japanese", "Korean", "Devanagari"};
+        final String[] scriptNames = {"Latin", "Chinese", "Japanese", "Korean", "Devanagari", "Arabic", "Thai"};
+        final int totalRecognizers = scriptNames.length; // 5 ML Kit + 2 Tesseract
 
-        final List<Text.TextBlock>[] results = new List[recognizers.length];
-        final AtomicInteger remaining = new AtomicInteger(recognizers.length);
+        final List<OcrBlock>[] results = new List[totalRecognizers];
+        final AtomicInteger remaining = new AtomicInteger(totalRecognizers);
         final AtomicInteger anySuccess = new AtomicInteger(0);
 
         for (int i = 0; i < recognizers.length; i++) {
@@ -302,8 +326,7 @@ public final class OcrTranslateHelper {
                             recognizer.close();
                             return;
                         }
-                        List<Text.TextBlock> blocks = visionText.getTextBlocks();
-                        results[idx] = blocks != null ? blocks : Collections.emptyList();
+                        results[idx] = toOcrBlocks(visionText.getTextBlocks());
                         anySuccess.incrementAndGet();
                         Log.d(TAG, "OCR " + scriptNames[idx] + " selesai, blok=" + results[idx].size());
                         finishMultiOcrIfDone(recognizers, scriptNames, results, remaining, anySuccess,
@@ -320,19 +343,83 @@ public final class OcrTranslateHelper {
                                 callback, alsoTranslate, myGeneration);
                     });
         }
+
+        // Recognizer ke-6: Arabic via Tesseract. Dijalankan di executor
+        // terpisah karena TessBaseAPI blocking, bukan Task-based.
+        final int arabicIdx = recognizers.length;
+        TESSERACT_EXECUTOR.execute(() -> {
+            List<OcrBlock> arabicBlocks;
+            try {
+                arabicBlocks = TesseractArabicRecognizer.recognize(appContext, bitmap);
+            } catch (Exception e) {
+                Log.w(TAG, "OCR Arabic (Tesseract) exception: " + e.getMessage());
+                arabicBlocks = Collections.emptyList();
+            }
+            final List<OcrBlock> finalArabicBlocks = arabicBlocks;
+            MAIN_HANDLER.post(() -> {
+                if (!isCurrent(myGeneration)) return;
+                results[arabicIdx] = finalArabicBlocks;
+                anySuccess.incrementAndGet();
+                Log.d(TAG, "OCR Arabic selesai, blok=" + finalArabicBlocks.size());
+                finishMultiOcrIfDone(recognizers, scriptNames, results, remaining, anySuccess,
+                        callback, alsoTranslate, myGeneration);
+            });
+        });
+
+        // Recognizer ke-7: Thai via Tesseract. Sama seperti Arabic di atas
+        // — dijalankan di executor Tesseract yang sama (single-thread,
+        // sehingga Arabic dan Thai berjalan berurutan satu sama lain, tapi
+        // tetap paralel terhadap kelima recognizer ML Kit di atas).
+        final int thaiIdx = recognizers.length + 1;
+        TESSERACT_EXECUTOR.execute(() -> {
+            List<OcrBlock> thaiBlocks;
+            try {
+                thaiBlocks = TesseractThaiRecognizer.recognize(appContext, bitmap);
+            } catch (Exception e) {
+                Log.w(TAG, "OCR Thai (Tesseract) exception: " + e.getMessage());
+                thaiBlocks = Collections.emptyList();
+            }
+            final List<OcrBlock> finalThaiBlocks = thaiBlocks;
+            MAIN_HANDLER.post(() -> {
+                if (!isCurrent(myGeneration)) return;
+                results[thaiIdx] = finalThaiBlocks;
+                anySuccess.incrementAndGet();
+                Log.d(TAG, "OCR Thai selesai, blok=" + finalThaiBlocks.size());
+                finishMultiOcrIfDone(recognizers, scriptNames, results, remaining, anySuccess,
+                        callback, alsoTranslate, myGeneration);
+            });
+        });
+    }
+
+    /** Konversi hasil ML Kit ({@code Text.TextBlock}) ke {@link OcrBlock} netral-library. */
+    private static List<OcrBlock> toOcrBlocks(List<Text.TextBlock> mlKitBlocks) {
+        List<OcrBlock> result = new ArrayList<>();
+        if (mlKitBlocks == null) return result;
+        for (Text.TextBlock block : mlKitBlocks) {
+            Rect box = block.getBoundingBox();
+            String text = block.getText();
+            if (box == null || text == null) continue;
+            result.add(new OcrBlock(text, box));
+        }
+        return result;
     }
 
     private static void finishMultiOcrIfDone(
             TextRecognizer[] recognizers,
             String[] scriptNames,
-            List<Text.TextBlock>[] results,
+            List<OcrBlock>[] results,
             AtomicInteger remaining,
             AtomicInteger anySuccess,
             ResultCallback callback,
             boolean alsoTranslate,
             long generation) {
         if (remaining.decrementAndGet() != 0) return;
-        // Semua recognizer sudah selesai (sukses atau gagal)
+        // Semua recognizer sudah selesai (sukses atau gagal). Hanya
+        // recognizer ML Kit yang perlu ditutup di sini — slot Arabic dan
+        // Thai (Tesseract) sudah mengurus siklus hidupnya sendiri
+        // (recycle()) masing-masing di dalam
+        // TesseractArabicRecognizer#recognize dan
+        // TesseractThaiRecognizer#recognize.
         for (TextRecognizer r : recognizers) {
             try { r.close(); } catch (Exception ignored) {}
         }
@@ -364,13 +451,19 @@ public final class OcrTranslateHelper {
         // isScriptTextValid). Recognizer Latin selalu dianggap valid
         // (dipakai juga untuk bahasa berdiakritik seperti Vietnamese, jadi
         // tidak bisa divalidasi rentang Unicode secara ketat).
-        List<Text.TextBlock> bestBlocks = Collections.emptyList();
+        List<OcrBlock> bestBlocks = Collections.emptyList();
         int bestScore = -1;
         String bestScript = "none";
         for (int i = 0; i < results.length; i++) {
-            List<Text.TextBlock> blocks = results[i];
+            List<OcrBlock> blocks = results[i];
             if (blocks == null || blocks.isEmpty()) continue;
             String script = scriptNames[i];
+            // Latin selalu dianggap valid tanpa validasi rentang Unicode
+            // (dipakai juga untuk bahasa berdiakritik). Semua skrip
+            // lainnya, TERMASUK Arabic dan Thai (hasil Tesseract),
+            // divalidasi dominasi karakter — lihat isCharInScript untuk
+            // rentang Unicode Arabic/Thai yang ditambahkan bersamaan
+            // dengan fitur ini.
             if (!"Latin".equals(script) && !isScriptTextValid(blocks, script)) {
                 Log.d(TAG, "OCR " + script + " dibuang: teks tidak didominasi karakter skrip " + script + " (kemungkinan salah-baca skrip lain)");
                 continue;
@@ -410,10 +503,10 @@ public final class OcrTranslateHelper {
      * dunia nyata sering bercampur dengan angka/tanda baca/spasi/label
      * Latin (mis. merk, angka versi) di antara karakter skrip aslinya.
      */
-    private static boolean isScriptTextValid(List<Text.TextBlock> blocks, String scriptName) {
+    private static boolean isScriptTextValid(List<OcrBlock> blocks, String scriptName) {
         int scriptChars = 0;
         int totalNonSpace = 0;
-        for (Text.TextBlock block : blocks) {
+        for (OcrBlock block : blocks) {
             String text = block.getText();
             if (text == null) continue;
             for (int i = 0; i < text.length(); i++) {
@@ -427,7 +520,19 @@ public final class OcrTranslateHelper {
         return scriptChars >= totalNonSpace * 0.4;
     }
 
-    /** Cek apakah satu karakter berada di rentang Unicode skrip yang disebut. */
+    /**
+     * Cek apakah satu karakter berada di rentang Unicode skrip yang disebut.
+     *
+     * "Arabic" DITAMBAHKAN bersamaan dengan {@link TesseractArabicRecognizer}
+     * — mencakup blok Unicode Arabic dasar, Arabic Supplement (huruf
+     * tambahan untuk bahasa non-Arab berskrip Arab seperti Urdu/Pashto/
+     * Sindhi), dan Arabic Presentation Forms A/B (bentuk sambung/kontekstual
+     * yang kadang muncul di hasil OCR mentah sebelum normalisasi).
+     *
+     * "Thai" DITAMBAHKAN bersamaan dengan {@link TesseractThaiRecognizer}
+     * — blok Unicode Thai mencakup seluruh aksara Thai (konsonan, vokal,
+     * tanda nada, dan angka Thai).
+     */
     private static boolean isCharInScript(char c, String scriptName) {
         Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
         if (block == null) return false;
@@ -448,15 +553,22 @@ public final class OcrTranslateHelper {
                         || block == Character.UnicodeBlock.HANGUL_COMPATIBILITY_JAMO;
             case "Devanagari":
                 return block == Character.UnicodeBlock.DEVANAGARI;
+            case "Arabic":
+                return block == Character.UnicodeBlock.ARABIC
+                        || block == Character.UnicodeBlock.ARABIC_SUPPLEMENT
+                        || block == Character.UnicodeBlock.ARABIC_PRESENTATION_FORMS_A
+                        || block == Character.UnicodeBlock.ARABIC_PRESENTATION_FORMS_B;
+            case "Thai":
+                return block == Character.UnicodeBlock.THAI;
             default:
                 return true;
         }
     }
 
     /** Skor sederhana: jumlah karakter dari blok yang lolos filter tinggi/panjang. */
-    private static int scoreOcrBlocks(List<Text.TextBlock> blocks) {
+    private static int scoreOcrBlocks(List<OcrBlock> blocks) {
         int score = 0;
-        for (Text.TextBlock block : blocks) {
+        for (OcrBlock block : blocks) {
             Rect box = block.getBoundingBox();
             String text = block.getText();
             if (box == null || text == null) continue;
@@ -477,9 +589,9 @@ public final class OcrTranslateHelper {
     }
 
     private static void detectLanguageAndTranslateBlocks(
-            List<Text.TextBlock> textBlocks, ResultCallback callback, long generation) {
-        List<Text.TextBlock> significantForDetection = filterSignificantBlocks(textBlocks);
-        List<Text.TextBlock> blocksForLangDetect =
+            List<OcrBlock> textBlocks, ResultCallback callback, long generation) {
+        List<OcrBlock> significantForDetection = filterSignificantBlocks(textBlocks);
+        List<OcrBlock> blocksForLangDetect =
                 significantForDetection.isEmpty() ? textBlocks : significantForDetection;
 
         // Urutkan dari teks TERPANJANG ke terpendek sebelum digabung.
@@ -500,12 +612,12 @@ public final class OcrTranslateHelper {
         // pernah "terlihat" oleh detektor sama sekali. Mengurutkan blok
         // terpanjang ke depan memastikan 200 karakter yang dipakai ML Kit
         // berasal dari konten yang benar-benar relevan.
-        List<Text.TextBlock> sortedForDetect = new ArrayList<>(blocksForLangDetect);
+        List<OcrBlock> sortedForDetect = new ArrayList<>(blocksForLangDetect);
         Collections.sort(sortedForDetect, (a, b) ->
                 Integer.compare(b.getText().trim().length(), a.getText().trim().length()));
 
         StringBuilder combined = new StringBuilder();
-        for (Text.TextBlock block : sortedForDetect) {
+        for (OcrBlock block : sortedForDetect) {
             combined.append(block.getText()).append("\n");
         }
 
@@ -553,7 +665,7 @@ public final class OcrTranslateHelper {
      * Jika kedua lapis tetap gagal, baru benar-benar menampilkan teks asli.
      */
     private static void detectLanguageFromLongestBlockFallback(
-            List<Text.TextBlock> sortedForDetect, List<Text.TextBlock> allBlocks,
+            List<OcrBlock> sortedForDetect, List<OcrBlock> allBlocks,
             ResultCallback callback, long generation) {
         if (sortedForDetect.isEmpty()) {
             callback.onSuccess(toUntranslatedBlocks(allBlocks));
@@ -592,7 +704,7 @@ public final class OcrTranslateHelper {
 
     /** Fallback lapis-2: gabungan 2-3 blok terpanjang. Lihat javadoc di atas. */
     private static void detectLanguageFromTopBlocksFallback(
-            List<Text.TextBlock> sortedForDetect, List<Text.TextBlock> allBlocks,
+            List<OcrBlock> sortedForDetect, List<OcrBlock> allBlocks,
             ResultCallback callback, long generation) {
         int take = Math.min(3, sortedForDetect.size());
         StringBuilder sb = new StringBuilder();
@@ -646,7 +758,7 @@ public final class OcrTranslateHelper {
 
     /** Lanjutkan ke translate (atau tampilkan asli bila bahasa terdeteksi = target). */
     private static void finishLanguageDetected(
-            String languageCode, List<Text.TextBlock> allBlocks,
+            String languageCode, List<OcrBlock> allBlocks,
             ResultCallback callback, long generation) {
         if (isTargetLanguage(languageCode)) {
             callback.onSuccess(toUntranslatedBlocks(allBlocks));
@@ -668,9 +780,9 @@ public final class OcrTranslateHelper {
         return TARGET_LANGUAGE.equals(normalized);
     }
 
-    private static List<Text.TextBlock> filterSignificantBlocks(List<Text.TextBlock> textBlocks) {
-        List<Text.TextBlock> result = new ArrayList<>();
-        for (Text.TextBlock block : textBlocks) {
+    private static List<OcrBlock> filterSignificantBlocks(List<OcrBlock> textBlocks) {
+        List<OcrBlock> result = new ArrayList<>();
+        for (OcrBlock block : textBlocks) {
             Rect box = block.getBoundingBox();
             String text = block.getText();
             if (box == null || text == null) continue;
@@ -713,9 +825,9 @@ public final class OcrTranslateHelper {
         return letters < total * 0.7;
     }
 
-    private static List<TranslatedBlock> toUntranslatedBlocks(List<Text.TextBlock> textBlocks) {
+    private static List<TranslatedBlock> toUntranslatedBlocks(List<OcrBlock> textBlocks) {
         List<TranslatedBlock> result = new ArrayList<>();
-        for (Text.TextBlock block : textBlocks) {
+        for (OcrBlock block : textBlocks) {
             Rect box = block.getBoundingBox();
             if (box == null) continue;
             String text = block.getText();
@@ -730,7 +842,7 @@ public final class OcrTranslateHelper {
      * ditampilkan dan {@link ResultCallback#onModelNotDownloaded} dipanggil.
      */
     private static void translateBlocksIfModelAvailable(
-            List<Text.TextBlock> textBlocks, String sourceLanguageCode,
+            List<OcrBlock> textBlocks, String sourceLanguageCode,
             ResultCallback callback, long generation) {
 
         // PERBAIKAN BUG — mismatch kode bahasa antar API ML Kit:
@@ -781,7 +893,7 @@ public final class OcrTranslateHelper {
     }
 
     private static void doTranslateBlocks(
-            List<Text.TextBlock> textBlocks, String sourceLanguageCode,
+            List<OcrBlock> textBlocks, String sourceLanguageCode,
             ResultCallback callback, long generation) {
 
         TranslatorOptions options = new TranslatorOptions.Builder()
@@ -797,10 +909,10 @@ public final class OcrTranslateHelper {
     }
 
     private static void translateEachBlock(
-            Translator translator, List<Text.TextBlock> textBlocks,
+            Translator translator, List<OcrBlock> textBlocks,
             ResultCallback callback, long generation) {
-        List<Text.TextBlock> validBlocks = new ArrayList<>();
-        for (Text.TextBlock block : textBlocks) {
+        List<OcrBlock> validBlocks = new ArrayList<>();
+        for (OcrBlock block : textBlocks) {
             if (block.getBoundingBox() != null && !block.getText().trim().isEmpty()) {
                 validBlocks.add(block);
             }
@@ -817,7 +929,7 @@ public final class OcrTranslateHelper {
 
         for (int i = 0; i < validBlocks.size(); i++) {
             final int idx = i;
-            Text.TextBlock block = validBlocks.get(i);
+            OcrBlock block = validBlocks.get(i);
             String originalText = block.getText();
             Rect box = block.getBoundingBox();
 

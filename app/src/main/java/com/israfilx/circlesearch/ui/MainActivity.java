@@ -25,6 +25,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.google.mlkit.nl.translate.TranslateLanguage;
 import com.israfilx.circlesearch.service.FloatingTriggerService;
 import com.israfilx.circlesearch.service.ScreenshotAccessibilityService;
 import com.israfilx.circlesearch.util.OcrTranslateHelper;
@@ -508,7 +509,19 @@ public class MainActivity extends Activity {
             row.setPadding(0, dp(6), 0, dp(6));
 
             TextView name = new TextView(this);
-            name.setText((ready ? "✓ " : "○ ") + info.displayName);
+            String label = (ready ? "✓ " : "○ ") + info.displayName;
+            // Arabic: OCR-nya SUDAH otomatis tersedia (Tesseract di-bundle
+            // di APK, tidak perlu diunduh) — beda dengan skrip lain yang
+            // OCR-nya juga bawaan ML Kit. Tapi translate-nya (Arab ->
+            // Indonesia) TETAP perlu model diunduh manual seperti bahasa
+            // lain di daftar ini, karena translate murni memakai ML Kit.
+            // Catatan ini mencegah user bingung "kok teks Arab kebaca
+            // tapi belum diterjemahkan" padahal itu memang harus unduh
+            // model translate dulu.
+            if (TranslateLanguage.ARABIC.equals(info.code) && !ready) {
+                label += " (baca teks: otomatis; unduh untuk terjemahan)";
+            }
+            name.setText(label);
             name.setTextSize(14);
             name.setTextColor(ready ? Color.parseColor(STATUS_OK) : Color.parseColor(TEXT_SECONDARY));
             LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);

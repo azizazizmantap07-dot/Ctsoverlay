@@ -124,6 +124,16 @@ dependencies {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
     }
+
+    // OCR Arabic: ML Kit Text Recognition TIDAK punya model on-device untuk
+    // skrip Arab sama sekali (limitasi Google, bukan bug kita — lihat
+    // javadoc OcrTranslateHelper#recognizeInternal). Tesseract4Android
+    // dipakai HANYA sebagai recognizer ke-6 khusus Arab, berjalan paralel
+    // dengan 5 recognizer ML Kit yang sudah ada. Varian "standard"
+    // (single-threaded) dipilih karena kita sudah menjalankan banyak
+    // recognizer paralel sekaligus per screenshot; varian OpenMP tidak
+    // memberi banyak untung di sini dan menambah kompleksitas native lib.
+    implementation 'cz.adaptech.tesseract4android:tesseract4android:4.8.0'
 }
 
 // Jaring pengaman tambahan: paksa semua konfigurasi memakai satu versi

@@ -12,5 +12,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // JitPack: dibutuhkan untuk cz.adaptech:tesseract4android (OCR
+        // Arabic) — library ini tidak dipublikasikan di Maven Central.
+        maven { url 'https://jitpack.io' }
     }
 }
