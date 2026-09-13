@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import com.googlecode.tesseract.android.TessBaseAPI;
+import com.googlecode.tesseract.android.ResultIterator;
 
 /**
  * OCR skrip Arabic via Tesseract (bukan ML Kit).
@@ -120,7 +121,7 @@ public final class TesseractArabicRecognizer {
             // agar dapat boundingBox per blok, konsisten dengan ML Kit).
             tessApi.getUTF8Text();
 
-            TessBaseAPI.ResultIterator iterator = tessApi.getResultIterator();
+            ResultIterator iterator = tessApi.getResultIterator();
             if (iterator != null) {
                 iterator.begin();
                 do {
