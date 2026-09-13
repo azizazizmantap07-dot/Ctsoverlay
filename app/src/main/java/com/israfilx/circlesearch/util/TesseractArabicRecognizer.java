@@ -127,7 +127,13 @@ public final class TesseractArabicRecognizer {
                 do {
                     String lineText = iterator.getUTF8Text(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
                     Rect box = iterator.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
-                    if (lineText != null && !lineText.trim().isEmpty() && box != null) {
+                    float conf = iterator.confidence(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
+                    // Filter baris confidence rendah: Tesseract sering "hallucinate"
+                    // teks skrip yang diminta pada gambar non-Arab (garis/noise
+                    // dibaca sebagai huruf Arab acak). Ambang 55 membuang
+                    // kebanyakan sampah tanpa membuang teks Arab yang agak
+                    // blur/kecil di screenshot.
+                    if (lineText != null && !lineText.trim().isEmpty() && box != null && conf >= 55.0f) {
                         result.add(new OcrBlock(lineText.trim(), box));
                     }
                 } while (iterator.next(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE));

@@ -111,6 +111,13 @@ public final class OcrTranslateHelper {
     private static final java.util.Map<String, String> LANGUAGE_CODE_ALIASES = new java.util.HashMap<>();
     static {
         LANGUAGE_CODE_ALIASES.put("fil", TranslateLanguage.TAGALOG); // Filipino -> "tl"
+        // LanguageIdentifier sering mengembalikan "ne" (Nepali) untuk teks
+        // Devanagari yang sebenarnya Hindi atau campuran. Translate API
+        // tidak mendukung Nepali, Marathi, dll. — map ke Hindi agar tetap
+        // bisa diterjemahkan (skrip sama, leksikon dekat).
+        LANGUAGE_CODE_ALIASES.put("ne", TranslateLanguage.HINDI); // Nepali -> hi
+        LANGUAGE_CODE_ALIASES.put("mr", TranslateLanguage.HINDI); // Marathi -> hi
+        LANGUAGE_CODE_ALIASES.put("sa", TranslateLanguage.HINDI); // Sanskrit -> hi
     }
 
     /**
@@ -451,43 +458,8 @@ public final class OcrTranslateHelper {
         // isScriptTextValid). Recognizer Latin selalu dianggap valid
         // (dipakai juga untuk bahasa berdiakritik seperti Vietnamese, jadi
         // tidak bisa divalidasi rentang Unicode secara ketat).
-        //
-        // PERBAIKAN BUG KEDUA (ditambahkan bersamaan dengan Tesseract Thai)
-        // — validasi dominasi karakter di atas TIDAK cukup untuk skrip yang
-        // visualnya mirip. Devanagari dan Thai sama-sama abugida berbentuk
-        // lengkung; ML Kit Devanagari kadang salah-baca teks Thai asli
-        // sebagai karakter Devanagari asli (bukan sampah campuran), jadi
-        // tetap lolos ambang 40% isScriptTextValid — lalu menang murni
-        // karena skornya (jumlah karakter) kebetulan lebih tinggi dari hasil
-        // Tesseract Thai yang justru BENAR. Pola yang sama juga terjadi
-        // antara Arabic dan Thai. Contoh nyata dari log: teks Thai
-        // terbaca "OCR terbaik: skrip=Devanagari" / "skrip=Arabic" berulang
-        // kali, padahal Tesseract Thai di capture yang sama juga
-        // menghasilkan blok valid.
-        //
-        // Perbaikan: recognizer Tesseract (Arabic, Thai) diberi BONUS skor
-        // tetap saat dibandingkan. Alasannya: keduanya pakai model bahasa
-        // KHUSUS untuk skrip itu (bukan model skrip lain yang "menebak"
-        // berdasarkan kemiripan visual seperti kasus Devanagari-vs-Thai di
-        // atas), jadi begitu lolos validasi dominasi karakter, hasilnya
-        // jauh lebih bisa dipercaya daripada ML Kit non-Latin yang menang
-        // cuma karena kebetulan menghasilkan lebih banyak karakter salah.
-        // Bonus ini TIDAK membuat Tesseract selalu menang mutlak — kalau
-        // ML Kit lain menghasilkan blok jauh lebih banyak/panjang secara
-        // sah (skrip yang benar-benar berbeda), skor aslinya (dikali
-        // bobot) tetap bisa mengalahkan bonus ini.
-        //
-        // Bonus ini adalah lapisan KEDUA. Lapisan pertama ada di
-        // isScriptTextValid: ambang dominasi karakter Devanagari dinaikkan
-        // ke 65% (dari 40%) karena Devanagari yang paling sering salah-baca
-        // Thai. Arabic SENGAJA dibiarkan di ambang 40% (tidak diketatkan)
-        // supaya hasil Arabic asli yang bercampur angka/tanda baca tidak
-        // ikut terbuang — kasus Arabic-vs-Thai yang lebih jarang itu cukup
-        // diatasi oleh bonus skor di bawah ini saja.
-        final int TESSERACT_PRIORITY_BONUS = 200;
         List<OcrBlock> bestBlocks = Collections.emptyList();
         int bestScore = -1;
-        int bestEffectiveScore = -1;
         String bestScript = "none";
         for (int i = 0; i < results.length; i++) {
             List<OcrBlock> blocks = results[i];
@@ -503,12 +475,16 @@ public final class OcrTranslateHelper {
                 Log.d(TAG, "OCR " + script + " dibuang: teks tidak didominasi karakter skrip " + script + " (kemungkinan salah-baca skrip lain)");
                 continue;
             }
-            int score = scoreOcrBlocks(blocks);
-            boolean isTesseract = "Arabic".equals(script) || "Thai".equals(script);
-            int effectiveScore = isTesseract ? score + TESSERACT_PRIORITY_BONUS : score;
-            if (effectiveScore > bestEffectiveScore) {
+            int rawScore = scoreOcrBlocks(blocks);
+            // Bobot skor dengan kemurnian skrip (purity). Latin dianggap
+            // purity 1.0. Skrip lain dihitung rasio karakter skrip /
+            // non-spasi. Ini membuat hasil "hampir murni" unggul atas
+            // hasil panjang tapi campur-aduk (hallucination Tesseract/
+            // ML Kit) yang lolos ambang 55%.
+            double purity = "Latin".equals(script) ? 1.0 : scriptPurity(blocks, script);
+            int score = (int) Math.round(rawScore * (0.5 + 0.5 * purity));
+            if (score > bestScore) {
                 bestScore = score;
-                bestEffectiveScore = effectiveScore;
                 bestBlocks = blocks;
                 bestScript = script;
             }
@@ -531,35 +507,20 @@ public final class OcrTranslateHelper {
     }
 
     /**
-     * True bila gabungan teks dari blok-blok ini didominasi karakter dari
-     * rentang Unicode yang sesuai dengan nama skrip yang diberikan. Dipakai
-     * untuk memvalidasi hasil recognizer non-Latin (Chinese/Japanese/Korean/
-     * Devanagari/Arabic/Thai) agar tidak "asal menang" saat sebenarnya
-     * salah membaca skrip lain sebagai skripnya sendiri.
+     * True bila gabungan teks dari blok-blok ini didominasi (>= 55%)
+     * karakter dari rentang Unicode yang sesuai dengan nama skrip yang
+     * diberikan. Dipakai untuk memvalidasi hasil recognizer non-Latin
+     * (Chinese/Japanese/Korean/Devanagari/Arabic/Thai) agar tidak "asal
+     * menang" saat sebenarnya salah membaca skrip lain sebagai skripnya
+     * sendiri.
      *
-     * Ambang dasar 40% (bukan >50%) sengaja dilonggarkan karena satu blok
-     * teks dunia nyata sering bercampur dengan angka/tanda baca/spasi/label
-     * Latin (mis. merk, angka versi) di antara karakter skrip aslinya.
-     *
-     * PENGETATAN KHUSUS Devanagari (ambang 65%, bukan 40%) — ditambahkan
-     * setelah Tesseract Thai masuk sebagai recognizer, karena log nyata
-     * menunjukkan ML Kit Devanagari kerap salah-baca lengkungan aksara Thai
-     * sebagai karakter Devanagari ASLI (bukan sampah campuran skrip),
-     * sehingga tetap lolos ambang 40% dan menang secara skor padahal salah.
-     * Devanagari dan Thai sama-sama abugida berbentuk lengkung sehingga
-     * paling rawan tertukar secara visual di antara semua skrip yang
-     * didukung. Ambang 65% mengurangi false-positive ini tanpa membuang
-     * kasus Devanagari asli yang sah (teks Hindi/Nepali dunia nyata
-     * biasanya jauh di atas 65% dominasi dalam satu blok).
-     *
-     * Arabic SENGAJA TIDAK ikut diketatkan (tetap 40%) — kasus Arabic
-     * salah-baca Thai jauh lebih jarang dibanding Devanagari, dan
-     * mengetatkan ambang Arabic berisiko membuang hasil Arabic ASLI yang
-     * sah kalau blok teksnya bercampur banyak angka/tanda baca (umum di
-     * UI game/app). Kasus Arabic-vs-Thai yang tersisa ditangani lewat
-     * lapisan kedua: lihat TESSERACT_PRIORITY_BONUS di pemanggil
-     * (recognizeInternal) yang memberi keunggulan skor ke Tesseract
-     * (Arabic & Thai) begitu keduanya lolos validasi ini.
+     * Ambang dinaikkan dari 40% ke 55% setelah pengujian log nyata:
+     * Tesseract Arabic/Thai dan ML Kit Devanagari sering menghasilkan
+     * string panjang yang hanya sebagian kecil karakter skrip yang
+     * diminta (sisanya sampah/latin/angka), sehingga lolos 40% dan
+     * mengalahkan recognizer yang benar. 55% masih toleran terhadap
+     * campuran angka/tanda baca/label Latin di teks dunia nyata, tapi
+     * membuang kebanyakan hasil salah-baca.
      */
     private static boolean isScriptTextValid(List<OcrBlock> blocks, String scriptName) {
         int scriptChars = 0;
@@ -575,9 +536,28 @@ public final class OcrTranslateHelper {
             }
         }
         if (totalNonSpace == 0) return false;
-        boolean isConfusableWithThai = "Devanagari".equals(scriptName);
-        double threshold = isConfusableWithThai ? 0.65 : 0.4;
-        return scriptChars >= totalNonSpace * threshold;
+        return scriptChars >= totalNonSpace * 0.55;
+    }
+
+    /**
+     * Rasio karakter skrip / total non-spasi (0.0–1.0). Dipakai untuk
+     * membobot skor OCR agar hasil yang lebih "murni" unggul.
+     */
+    private static double scriptPurity(List<OcrBlock> blocks, String scriptName) {
+        int scriptChars = 0;
+        int totalNonSpace = 0;
+        for (OcrBlock block : blocks) {
+            String text = block.getText();
+            if (text == null) continue;
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                if (Character.isWhitespace(c)) continue;
+                totalNonSpace++;
+                if (isCharInScript(c, scriptName)) scriptChars++;
+            }
+        }
+        if (totalNonSpace == 0) return 0.0;
+        return (double) scriptChars / totalNonSpace;
     }
 
     /**
@@ -612,7 +592,12 @@ public final class OcrTranslateHelper {
                         || block == Character.UnicodeBlock.HANGUL_JAMO
                         || block == Character.UnicodeBlock.HANGUL_COMPATIBILITY_JAMO;
             case "Devanagari":
-                return block == Character.UnicodeBlock.DEVANAGARI;
+                // DEVANAGARI + Extended (huruf tambahan yang kadang muncul
+                // di teks Hindi/Nepali modern). Extended tersedia sejak
+                // API 19; null-safe lewat try/catch tidak perlu karena
+                // konstanta ada di semua API yang kita target.
+                return block == Character.UnicodeBlock.DEVANAGARI
+                        || block == Character.UnicodeBlock.DEVANAGARI_EXTENDED;
             case "Arabic":
                 return block == Character.UnicodeBlock.ARABIC
                         || block == Character.UnicodeBlock.ARABIC_SUPPLEMENT
