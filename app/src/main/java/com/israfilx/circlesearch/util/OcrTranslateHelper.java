@@ -118,6 +118,8 @@ public final class OcrTranslateHelper {
         LANGUAGE_CODE_ALIASES.put("ne", TranslateLanguage.HINDI); // Nepali -> hi
         LANGUAGE_CODE_ALIASES.put("mr", TranslateLanguage.HINDI); // Marathi -> hi
         LANGUAGE_CODE_ALIASES.put("sa", TranslateLanguage.HINDI); // Sanskrit -> hi
+        // Tajik (tg) memakai Cyrillic; Translate tidak support → map ke Rusia
+        LANGUAGE_CODE_ALIASES.put("tg", TranslateLanguage.RUSSIAN);
     }
 
     /**
@@ -548,38 +550,42 @@ public final class OcrTranslateHelper {
             bestScript = bestMlKitScript;
         }
 
-        // Prefer Cyrillic murni atas Latin: jika Cyrillic purity tinggi dan
-        // skornya minimal 30% dari Latin (atau Latin yang menang), pilih Cyrillic.
-        // Kasus nyata: teks Rusia → Latin skor 1096 (sampah), Cyrillic 20 blok
-        // purity 100% tapi kalah di skor karakter.
-        if (bestCyrillicScore > 0 && bestCyrillicPurity >= 0.80
-                && ("Latin".equals(bestScript) || bestCyrillicScore >= bestScore * 0.30)) {
-            if (!"Cyrillic".equals(bestScript)) {
-                Log.d(TAG, "OCR " + bestScript + " (skor=" + bestScore
-                        + ") digeser oleh Cyrillic (skor=" + bestCyrillicScore
-                        + ", purity=" + String.format("%.0f", bestCyrillicPurity * 100)
-                        + "%) prefer-script");
-            }
+        // Prefer Cyrillic HANYA atas Latin, dan HANYA jika skor Cyrillic
+        // cukup besar (bukan 1 baris sampah conf tinggi).
+        // Bug v1.9.15: skor Cyrillic=20 / Arabic=74 menggeser Latin/Jepang
+        // yang benar (Inggris, Vietnam, Spanyol, dll.) → terjemahan kacau.
+        // Syarat ketat:
+        //   1) pemenang saat ini HARUS Latin (jangan geser Japanese/Chinese/…)
+        //   2) purity >= 80%
+        //   3) skor Cyrillic >= max(200, 45% skor Latin)
+        // Kasus Rusia nyata: Latin~1090, Cyrillic~1022 → lolos.
+        // Kasus Inggris palsu: Latin~1134, Cyrillic~20 → ditolak.
+        if ("Latin".equals(bestScript)
+                && bestCyrillicScore > 0
+                && bestCyrillicPurity >= 0.80
+                && bestCyrillicScore >= Math.max(200, (int) (bestScore * 0.45))) {
+            Log.d(TAG, "OCR Latin (skor=" + bestScore
+                    + ") digeser oleh Cyrillic (skor=" + bestCyrillicScore
+                    + ", purity=" + String.format("%.0f", bestCyrillicPurity * 100)
+                    + "%) prefer-script");
             bestBlocks = bestCyrillicBlocks;
             bestScore = bestCyrillicScore;
             bestScript = "Cyrillic";
         }
 
-        // Prefer Arabic murni atas Latin (alasan sama seperti Cyrillic).
-        if (bestArabicScore > 0 && bestArabicPurity >= 0.80
-                && ("Latin".equals(bestScript) || bestArabicScore >= bestScore * 0.30)) {
-            // Jangan override Cyrillic yang baru saja dipilih kecuali Arabic jauh lebih kuat
-            if ("Cyrillic".equals(bestScript) && bestArabicScore < bestCyrillicScore * 1.2) {
-                // biarkan Cyrillic
-            } else if (!"Arabic".equals(bestScript)) {
-                Log.d(TAG, "OCR " + bestScript + " (skor=" + bestScore
-                        + ") digeser oleh Arabic (skor=" + bestArabicScore
-                        + ", purity=" + String.format("%.0f", bestArabicPurity * 100)
-                        + "%) prefer-script");
-                bestBlocks = bestArabicBlocks;
-                bestScore = bestArabicScore;
-                bestScript = "Arabic";
-            }
+        // Prefer Arabic HANYA atas Latin, syarat skor sama ketatnya.
+        // Jangan geser Japanese/Chinese/Korean/Devanagari/Cyrillic.
+        if ("Latin".equals(bestScript)
+                && bestArabicScore > 0
+                && bestArabicPurity >= 0.80
+                && bestArabicScore >= Math.max(200, (int) (bestScore * 0.45))) {
+            Log.d(TAG, "OCR Latin (skor=" + bestScore
+                    + ") digeser oleh Arabic (skor=" + bestArabicScore
+                    + ", purity=" + String.format("%.0f", bestArabicPurity * 100)
+                    + "%) prefer-script");
+            bestBlocks = bestArabicBlocks;
+            bestScore = bestArabicScore;
+            bestScript = "Arabic";
         }
 
         if (bestBlocks.isEmpty() || bestScore <= 0) {
