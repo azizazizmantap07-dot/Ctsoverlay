@@ -14,7 +14,7 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
-import cz.adaptech.tesseract4android.TessBaseAPI;
+import com.googlecode.tesseract.android.TessBaseAPI;
 
 /**
  * OCR skrip Thai via Tesseract (bukan ML Kit).
