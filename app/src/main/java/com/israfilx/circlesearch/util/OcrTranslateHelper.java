@@ -306,7 +306,7 @@ public final class OcrTranslateHelper {
                         results[idx] = blocks != null ? blocks : Collections.emptyList();
                         anySuccess.incrementAndGet();
                         Log.d(TAG, "OCR " + scriptNames[idx] + " selesai, blok=" + results[idx].size());
-                        finishMultiOcrIfDone(recognizers, results, remaining, anySuccess,
+                        finishMultiOcrIfDone(recognizers, scriptNames, results, remaining, anySuccess,
                                 callback, alsoTranslate, myGeneration);
                     })
                     .addOnFailureListener(e -> {
@@ -316,7 +316,7 @@ public final class OcrTranslateHelper {
                         }
                         Log.w(TAG, "OCR " + scriptNames[idx] + " gagal: " + e.getMessage());
                         results[idx] = Collections.emptyList();
-                        finishMultiOcrIfDone(recognizers, results, remaining, anySuccess,
+                        finishMultiOcrIfDone(recognizers, scriptNames, results, remaining, anySuccess,
                                 callback, alsoTranslate, myGeneration);
                     });
         }
@@ -324,6 +324,7 @@ public final class OcrTranslateHelper {
 
     private static void finishMultiOcrIfDone(
             TextRecognizer[] recognizers,
+            String[] scriptNames,
             List<Text.TextBlock>[] results,
             AtomicInteger remaining,
             AtomicInteger anySuccess,
