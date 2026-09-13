@@ -317,8 +317,8 @@ public final class OcrTranslateHelper {
                 TextRecognition.getClient(new KoreanTextRecognizerOptions.Builder().build()),
                 TextRecognition.getClient(new DevanagariTextRecognizerOptions.Builder().build())
         };
-        final String[] scriptNames = {"Latin", "Chinese", "Japanese", "Korean", "Devanagari", "Arabic", "Thai"};
-        final int totalRecognizers = scriptNames.length; // 5 ML Kit + 2 Tesseract
+        final String[] scriptNames = {"Latin", "Chinese", "Japanese", "Korean", "Devanagari", "Arabic", "Thai", "Cyrillic"};
+        final int totalRecognizers = scriptNames.length; // 5 ML Kit + 3 Tesseract (Arabic, Thai, Cyrillic)
 
         final List<OcrBlock>[] results = new List[totalRecognizers];
         final AtomicInteger remaining = new AtomicInteger(totalRecognizers);
@@ -396,6 +396,28 @@ public final class OcrTranslateHelper {
                         callback, alsoTranslate, myGeneration);
             });
         });
+
+        // Recognizer ke-8: Cyrillic (Rusia dll) via Tesseract.
+        // ML Kit tidak punya model Cyrillic on-device.
+        final int cyrillicIdx = recognizers.length + 2;
+        TESSERACT_EXECUTOR.execute(() -> {
+            List<OcrBlock> cyrillicBlocks;
+            try {
+                cyrillicBlocks = TesseractCyrillicRecognizer.recognize(appContext, bitmap);
+            } catch (Exception e) {
+                Log.w(TAG, "OCR Cyrillic (Tesseract) exception: " + e.getMessage());
+                cyrillicBlocks = Collections.emptyList();
+            }
+            final List<OcrBlock> finalCyrillicBlocks = cyrillicBlocks;
+            MAIN_HANDLER.post(() -> {
+                if (!isCurrent(myGeneration)) return;
+                results[cyrillicIdx] = finalCyrillicBlocks;
+                anySuccess.incrementAndGet();
+                Log.d(TAG, "OCR Cyrillic selesai, blok=" + finalCyrillicBlocks.size());
+                finishMultiOcrIfDone(recognizers, scriptNames, results, remaining, anySuccess,
+                        callback, alsoTranslate, myGeneration);
+            });
+        });
     }
 
     /** Konversi hasil ML Kit ({@code Text.TextBlock}) ke {@link OcrBlock} netral-library. */
@@ -425,8 +447,7 @@ public final class OcrTranslateHelper {
         // recognizer ML Kit yang perlu ditutup di sini — slot Arabic dan
         // Thai (Tesseract) sudah mengurus siklus hidupnya sendiri
         // (recycle()) masing-masing di dalam
-        // TesseractArabicRecognizer#recognize dan
-        // TesseractThaiRecognizer#recognize.
+        // TesseractArabicRecognizer, TesseractThaiRecognizer, dan TesseractCyrillicRecognizer.
         for (TextRecognizer r : recognizers) {
             try { r.close(); } catch (Exception ignored) {}
         }
@@ -482,7 +503,7 @@ public final class OcrTranslateHelper {
             int rawScore = scoreOcrBlocks(blocks);
             double purity = "Latin".equals(script) ? 1.0 : scriptPurity(blocks, script);
             int score = (int) Math.round(rawScore * (0.5 + 0.5 * purity));
-            boolean isTesseract = "Arabic".equals(script) || "Thai".equals(script);
+            boolean isTesseract = "Arabic".equals(script) || "Thai".equals(script) || "Cyrillic".equals(script);
             if (!isTesseract && score > bestMlKitScore) {
                 bestMlKitScore = score;
                 bestMlKitBlocks = blocks;
@@ -500,7 +521,7 @@ public final class OcrTranslateHelper {
         // Hallucinasi Tesseract sering menghasilkan skor sangat tinggi (banyak
         // huruf acak) pada teks Latin/CJK/Devanagari — ML Kit jauh lebih andal
         // untuk skrip-skrip itu.
-        if (("Thai".equals(bestScript) || "Arabic".equals(bestScript))
+        if (("Thai".equals(bestScript) || "Arabic".equals(bestScript) || "Cyrillic".equals(bestScript))
                 && bestMlKitScore > 0
                 && bestMlKitScore >= bestScore * 0.40) {
             Log.d(TAG, "OCR " + bestScript + " (skor=" + bestScore
@@ -557,7 +578,7 @@ public final class OcrTranslateHelper {
         // Arabic & Thai (Tesseract) sering hallucinate huruf skrip murni pada
         // gambar non-skrip. Ambang lebih ketat: 55% huruf skrip + minimal 8
         // huruf. Skrip ML Kit tetap 35% / min 6 (lebih toleran).
-        boolean isTesseractScript = "Arabic".equals(scriptName) || "Thai".equals(scriptName);
+        boolean isTesseractScript = "Arabic".equals(scriptName) || "Thai".equals(scriptName) || "Cyrillic".equals(scriptName);
         double minRatio = isTesseractScript ? 0.55 : 0.35;
         int minAbs = isTesseractScript ? 8 : 6;
         boolean ok = scriptLetters >= totalLetters * minRatio || scriptLetters >= minAbs;
@@ -611,6 +632,8 @@ public final class OcrTranslateHelper {
                 return us == Character.UnicodeScript.ARABIC;
             case "Thai":
                 return us == Character.UnicodeScript.THAI;
+            case "Cyrillic":
+                return us == Character.UnicodeScript.CYRILLIC;
             default:
                 return true;
         }
