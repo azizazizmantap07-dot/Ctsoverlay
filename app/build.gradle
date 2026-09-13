@@ -10,8 +10,8 @@ android {
         applicationId "com.israfilx.circlesearch"
         minSdk 26
         targetSdk 34
-        versionCode 40
-        versionName "1.9.19"
+        versionCode 24
+        versionName "1.9.3"
     }
 
     // Dibaca dari properti -P yang diinjeksikan workflow build-release.yml
@@ -95,9 +95,6 @@ dependencies {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
     }
-    // Tesseract OCR untuk skrip Arab & Thai (gratis, on-device, offline).
-    // traineddata (ara.traineddata / tha.traineddata) diunduh on-demand.
-    implementation 'cz.adaptech.tesseract4android:tesseract4android:4.9.0'
 }
 
 // Jaring pengaman tambahan: paksa semua konfigurasi memakai satu versi

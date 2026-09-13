@@ -26,8 +26,7 @@
     <application
         android:label="Circle Search Overlay"
         android:icon="@mipmap/ic_launcher"
-        android:allowBackup="true"
-        android:fullBackupContent="@xml/backup_rules"
+        android:allowBackup="false"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 

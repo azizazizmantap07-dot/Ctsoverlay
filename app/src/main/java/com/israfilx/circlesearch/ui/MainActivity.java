@@ -63,7 +63,6 @@ public class MainActivity extends Activity {
     private TextView statusA11y;
     private TextView statusBattery;
     private TextView languageStatusText;
-    private TextView backupStatusText;
     private LinearLayout languageListContainer;
     private ProgressBar downloadProgress;
     private TextView downloadProgressText;
@@ -202,33 +201,6 @@ public class MainActivity extends Activity {
         refreshLangButton.setOnClickListener(v -> refreshLanguageStatus());
         root.addView(refreshLangButton);
 
-        // ============================================================
-        // BACKUP & RESTORE MODEL BAHASA (untuk debug — hindari unduh
-        // ulang tiap kali clear-data / reinstall)
-        // ============================================================
-        root.addView(itemLabel("Backup & restore (untuk debug)"));
-        root.addView(bodyText(
-                "Arab/Thai (Tesseract) bisa dibackup sebagai FILE nyata karena " +
-                "tersimpan di app ini sendiri. Bahasa lain (ML Kit) tersimpan di " +
-                "storage privat Google Play Services — tidak bisa dibackup sebagai " +
-                "file, tapi daftar bahasa yang pernah diunduh dicatat & bisa " +
-                "diunduh ulang otomatis lewat 'Restore ML Kit dari riwayat'."));
-
-        backupStatusText = statusText();
-        root.addView(backupStatusText);
-
-        Button btnBackupTess = actionButton("Backup Arab/Thai (Tesseract) ke penyimpanan app");
-        btnBackupTess.setOnClickListener(v -> backupTessdata());
-        root.addView(btnBackupTess);
-
-        Button btnRestoreTess = actionButton("Restore Arab/Thai dari backup (skip unduh ulang)");
-        btnRestoreTess.setOnClickListener(v -> restoreTessdata());
-        root.addView(btnRestoreTess);
-
-        Button btnRestoreHistory = actionButton("Restore ML Kit dari riwayat (unduh ulang otomatis)");
-        btnRestoreHistory.setOnClickListener(v -> restoreLanguagesFromHistory());
-        root.addView(btnRestoreHistory);
-
         root.addView(itemLabel("Daftar bahasa (ketuk unduh / hapus)"));
         languageListContainer = new LinearLayout(this);
         languageListContainer.setOrientation(LinearLayout.VERTICAL);
@@ -279,7 +251,6 @@ public class MainActivity extends Activity {
         super.onResume();
         refreshPermissionStatus();
         refreshLanguageStatus();
-        refreshBackupStatus();
         ensureFloatingRunning();
     }
 
@@ -509,7 +480,6 @@ public class MainActivity extends Activity {
                             ? " (termasuk Indonesia)" : " — model target Indonesia BELUM ada"));
                     languageStatusText.setTextColor(Color.parseColor("#5AA9FF"));
                     rebuildLanguageList();
-                    refreshBackupStatus();
                 });
             }
 
@@ -519,7 +489,6 @@ public class MainActivity extends Activity {
                     languageStatusText.setText("Gagal memeriksa model: " + e.getMessage());
                     languageStatusText.setTextColor(Color.parseColor(STATUS_BAD));
                     rebuildLanguageList();
-                    refreshBackupStatus();
                 });
             }
         });
@@ -569,7 +538,7 @@ public class MainActivity extends Activity {
         if (isDownloading) return;
         setDownloading(true, "Mengunduh " + info.displayName + "…");
 
-        OcrTranslateHelper.downloadModel(this, info.code, new OcrTranslateHelper.ModelCallback() {
+        OcrTranslateHelper.downloadModel(info.code, new OcrTranslateHelper.ModelCallback() {
             @Override
             public void onSuccess() {
                 mainHandler.post(() -> {
@@ -600,134 +569,6 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void backupTessdata() {
-        if (isDownloading) return;
-        setDownloading(true, "Membackup model Arab/Thai…");
-        OcrTranslateHelper.backupTessdata(this, new OcrTranslateHelper.ModelCallback() {
-            @Override
-            public void onSuccess() {
-                mainHandler.post(() -> {
-                    setDownloading(false, null);
-                    Toast.makeText(MainActivity.this,
-                            "Backup Arab/Thai berhasil — aman dari clear-data/uninstall biasa",
-                            Toast.LENGTH_LONG).show();
-                    refreshBackupStatus();
-                });
-            }
-
-            @Override
-            public void onFailure(Exception e) {
-                mainHandler.post(() -> {
-                    setDownloading(false, null);
-                    Toast.makeText(MainActivity.this,
-                            "Gagal backup: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                });
-            }
-
-            @Override
-            public void onProgress(String message) {
-                mainHandler.post(() -> {
-                    if (downloadProgressText != null) downloadProgressText.setText(message);
-                });
-            }
-        });
-    }
-
-    private void restoreTessdata() {
-        if (isDownloading) return;
-        setDownloading(true, "Memulihkan model Arab/Thai dari backup…");
-        OcrTranslateHelper.restoreTessdata(this, new OcrTranslateHelper.ModelCallback() {
-            @Override
-            public void onSuccess() {
-                mainHandler.post(() -> {
-                    setDownloading(false, null);
-                    Toast.makeText(MainActivity.this,
-                            "Arab/Thai dipulihkan dari backup — tidak perlu unduh ulang",
-                            Toast.LENGTH_LONG).show();
-                    refreshBackupStatus();
-                });
-            }
-
-            @Override
-            public void onFailure(Exception e) {
-                mainHandler.post(() -> {
-                    setDownloading(false, null);
-                    Toast.makeText(MainActivity.this,
-                            "Gagal restore: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                });
-            }
-
-            @Override
-            public void onProgress(String message) {
-                mainHandler.post(() -> {
-                    if (downloadProgressText != null) downloadProgressText.setText(message);
-                });
-            }
-        });
-    }
-
-    private void restoreLanguagesFromHistory() {
-        if (isDownloading) return;
-
-        List<String> history = OcrTranslateHelper.getDownloadHistory(this);
-        if (history.isEmpty()) {
-            Toast.makeText(this,
-                    "Belum ada riwayat bahasa ML Kit yang pernah diunduh di perangkat ini",
-                    Toast.LENGTH_LONG).show();
-            return;
-        }
-
-        new AlertDialog.Builder(this)
-                .setTitle("Restore ML Kit dari riwayat")
-                .setMessage("Akan mengunduh ulang " + history.size() + " bahasa yang pernah " +
-                        "diunduh sebelumnya di perangkat ini: " + String.join(", ", history) + ". " +
-                        "Butuh internet — model ML Kit tersimpan di Play Services, bukan file " +
-                        "app ini, jadi tidak bisa dipulihkan tanpa unduh ulang. Lanjutkan?")
-                .setPositiveButton("Restore", (d, w) -> {
-                    setDownloading(true, "Memulai restore dari riwayat…");
-                    OcrTranslateHelper.restoreLanguagesFromHistory(this, new OcrTranslateHelper.ModelCallback() {
-                        @Override
-                        public void onSuccess() {
-                            mainHandler.post(() -> {
-                                setDownloading(false, null);
-                                Toast.makeText(MainActivity.this,
-                                        "Restore dari riwayat selesai", Toast.LENGTH_LONG).show();
-                                refreshLanguageStatus();
-                            });
-                        }
-
-                        @Override
-                        public void onFailure(Exception e) {
-                            mainHandler.post(() -> {
-                                setDownloading(false, null);
-                                Toast.makeText(MainActivity.this,
-                                        "Restore gagal: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                                refreshLanguageStatus();
-                            });
-                        }
-
-                        @Override
-                        public void onProgress(String message) {
-                            mainHandler.post(() -> {
-                                if (downloadProgressText != null) downloadProgressText.setText(message);
-                            });
-                        }
-                    });
-                })
-                .setNegativeButton("Batal", null)
-                .show();
-    }
-
-    private void refreshBackupStatus() {
-        if (backupStatusText == null) return;
-        boolean backupReady = OcrTranslateHelper.isTessdataBackupAvailable(this);
-        int historyCount = OcrTranslateHelper.getDownloadHistory(this).size();
-        backupStatusText.setText(
-                (backupReady ? "✓ Backup Arab/Thai tersedia" : "○ Belum ada backup Arab/Thai")
-                        + "  •  Riwayat ML Kit: " + historyCount + " bahasa");
-        backupStatusText.setTextColor(Color.parseColor(backupReady ? STATUS_OK : STATUS_NEUTRAL));
-    }
-
     private void downloadAllLanguages() {
         if (isDownloading) return;
 
@@ -738,7 +579,7 @@ public class MainActivity extends Activity {
                         "Pastikan koneksi internet stabil. Lanjutkan?")
                 .setPositiveButton("Unduh semua", (d, w) -> {
                     setDownloading(true, "Memulai unduhan semua bahasa…");
-                    OcrTranslateHelper.downloadAllModels(MainActivity.this, new OcrTranslateHelper.ModelCallback() {
+                    OcrTranslateHelper.downloadAllModels(new OcrTranslateHelper.ModelCallback() {
                         @Override
                         public void onSuccess() {
                             mainHandler.post(() -> {
