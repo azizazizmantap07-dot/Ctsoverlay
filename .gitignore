@@ -1,0 +1,20 @@
+# Build output
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# KEYSTORE RELEASE - JANGAN PERNAH DI-COMMIT
+*.jks
+*.keystore
+release.keystore*
+keystore.properties
+
+# Debug keystore tetap harus ikut ter-commit (lihat README)
+!keystore/debug_keystore.dat

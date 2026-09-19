@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Overlay UI untuk selection layer -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Accessibility minimal: hanya takeScreenshot untuk floating trigger -->
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
+
+    <!-- Dibutuhkan agar app bisa terdaftar sebagai default Assistant / VoiceInteractionService -->
+    <uses-permission android:name="android.permission.BIND_VOICE_INTERACTION" />
+
+    <!-- Foreground service (session capture berjalan singkat tapi perlu foreground agar tidak dibunuh) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- ML Kit Translate perlu ini untuk mengunduh model bahasa (sekali
+         per pasangan bahasa; setelah terunduh, translate bekerja offline).
+         OCR (Text Recognition) dan deteksi bahasa tidak butuh internet. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Minta user menonaktifkan optimasi baterai agar service tidak di-kill -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="false"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.CircleSearch">
+
+        <!-- Catatan privasi: meta-data ini HANYA relevan bila app diinstal
+             lewat Google Play Store (memberi tahu Play Services untuk
+             auto-download model OCR saat instalasi, supaya siap pakai
+             tanpa delay pertama kali dipakai). App ini sendiri di-build &
+             didistribusikan di luar Play Store (lihat GitHub Actions
+             release), jadi meta-data ini praktis tidak
+             pernah terpakai — dibiarkan ada hanya sebagai no-op yang
+             aman bila suatu saat didistribusikan lewat Play Store juga.
+             Tanpa meta-data ini pun OCR tetap jalan normal: model
+             diunduh on-demand oleh ML Kit sendiri saat pertama dipakai. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="ocr" />
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            WebView in-app untuk reverse image search (Google Lens / Bing).
+            Dibuka dari OverlayCaptureService saat aksi "Cari" dipicu.
+        -->
+        <activity
+            android:name=".ui.ImageSearchWebActivity"
+            android:exported="false"
+            android:theme="@style/Theme.CircleSearch"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:hardwareAccelerated="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask" />
+
+        <!--
+            WAJIB untuk lolos syarat RoleManager android.app.role.ASSISTANT.
+            Tanpa activity ACTION_ASSIST ini, VoiceInteractionService saja
+            tidak cukup — app tidak akan muncul di daftar pilihan Settings
+            "Aplikasi asisten digital", meski service-nya valid.
+            Theme transparan + noHistory karena activity ini tidak pernah
+            benar-benar menampilkan UI (langsung finish() setelah start
+            OverlayCaptureService).
+        -->
+        <activity
+            android:name=".ui.AssistTriggerActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            VoiceInteractionService: ini "pintu masuk" trigger utama.
+            Begitu app ini di-set sebagai default assistant,
+            sistem akan memanggil onLaunchVoiceAssist() / SessionService saat
+            gesture assist (swipe pojok bawah / long-press power) dipicu.
+        -->
+        <service
+            android:name=".service.MyVoiceInteractionService"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interaction_service" />
+        </service>
+
+        <service
+            android:name=".service.MyVoiceInteractionSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true" />
+
+        <!--
+            Foreground service tempat capture + overlay selection.
+        -->
+        <service
+            android:name=".service.OverlayCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="screen-overlay-capture" />
+        </service>
+
+        <service
+            android:name=".service.FloatingTriggerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="floating-trigger-pill" />
+        </service>
+
+        <service
+            android:name=".service.ScreenshotAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="Circle Search Screenshot">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/screenshot_accessibility_config" />
+        </service>
+
+        <!--
+            FileProvider: dibutuhkan agar bitmap hasil crop (disimpan di
+            cache internal) bisa diberikan ke ImageSearchWebActivity lewat
+            content:// URI, sesuai kewajiban Android 7+.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+</manifest>

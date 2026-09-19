@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ===== Palet Material 3 (dark) ===== -->
+    <color name="m3_primary">#A7CBDE</color>
+    <color name="m3_on_primary">#0A3445</color>
+    <color name="m3_primary_container">#254B5C</color>
+    <color name="m3_on_primary_container">#C2E8FB</color>
+    <color name="m3_secondary">#B4CAD6</color>
+    <color name="m3_on_secondary">#1F333D</color>
+    <color name="m3_secondary_container">#364954</color>
+    <color name="m3_on_secondary_container">#D0E6F3</color>
+    <color name="m3_tertiary">#97D4B4</color>
+    <color name="m3_tertiary_container">#0E5137</color>
+    <color name="m3_on_tertiary_container">#B3F0CF</color>
+    <color name="m3_error">#FFB4AB</color>
+    <color name="m3_error_container">#93000A</color>
+    <color name="m3_on_error_container">#FFDAD6</color>
+    <color name="m3_background">#0F1417</color>
+    <color name="m3_surface">#0F1417</color>
+    <color name="m3_on_surface">#DFE3E7</color>
+    <color name="m3_surface_variant">#40484C</color>
+    <color name="m3_on_surface_variant">#C0C8CD</color>
+    <color name="m3_surface_container">#1B2023</color>
+    <color name="m3_surface_container_high">#262B2E</color>
+    <color name="m3_outline">#8A9297</color>
+    <color name="m3_outline_variant">#40484C</color>
+
+    <color name="overlay_surface">#F21B2023</color>
+    <color name="overlay_on_surface">#DFE3E7</color>
+    <color name="overlay_chip">#33A7CBDE</color>
+    <color name="overlay_accent">#A7CBDE</color>
+
+    <color name="chip_idle">#262B2E</color>
+</resources>
