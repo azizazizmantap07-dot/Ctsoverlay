@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Warna latar ikon launcher (cocok dengan tepi gelap artwork). -->
+    <color name="ic_launcher_background">#140606</color>
+
+    <!-- ===== Palet Material 3 (light) — seed biru-teal lembut ===== -->
+    <color name="m3_primary">#3F6374</color>
+    <color name="m3_on_primary">#FFFFFF</color>
+    <color name="m3_primary_container">#C2E8FB</color>
+    <color name="m3_on_primary_container">#001F2B</color>
+    <color name="m3_secondary">#4D616C</color>
+    <color name="m3_on_secondary">#FFFFFF</color>
+    <color name="m3_secondary_container">#D0E6F3</color>
+    <color name="m3_on_secondary_container">#081E27</color>
+    <color name="m3_tertiary">#2F6B4F</color>
+    <color name="m3_tertiary_container">#B3F0CF</color>
+    <color name="m3_on_tertiary_container">#002113</color>
+    <color name="m3_error">#BA1A1A</color>
+    <color name="m3_error_container">#FFDAD6</color>
+    <color name="m3_on_error_container">#410002</color>
+    <color name="m3_background">#F6FAFD</color>
+    <color name="m3_surface">#F6FAFD</color>
+    <color name="m3_on_surface">#181C1F</color>
+    <color name="m3_surface_variant">#DCE4E9</color>
+    <color name="m3_on_surface_variant">#40484C</color>
+    <color name="m3_surface_container">#EAEEF1</color>
+    <color name="m3_surface_container_high">#E4E9EC</color>
+    <color name="m3_outline">#70787D</color>
+    <color name="m3_outline_variant">#C0C8CD</color>
+
+    <!-- Overlay di atas layar (menu ikon bawah, pill loading) — pakai konteks
+         Service tanpa tema Activity, jadi dirujuk lewat R.color, bukan ?attr. -->
+    <color name="overlay_surface">#F2EAEEF1</color>
+    <color name="overlay_on_surface">#181C1F</color>
+    <color name="overlay_chip">#33254B5C</color>
+    <color name="overlay_accent">#3F6374</color>
+
+    <!-- Toolbar hasil pencarian (chip tidak aktif) -->
+    <color name="chip_idle">#E4E9EC</color>
+</resources>

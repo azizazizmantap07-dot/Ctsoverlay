@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Aturan backup TERBATAS — sengaja tidak menyertakan seluruh data app
+    (mis. cache screenshot/crop di circlesearch_shares, yang lebih sensitif
+    karena berisi hasil capture layar user) meski allowBackup="true".
+
+    Hanya dua hal yang disertakan, keduanya memang dirancang untuk
+    dipulihkan lewat backup/restore (lihat fitur "Backup & restore" di
+    menu bahasa MainActivity):
+      1. tessdata_backup/  — salinan model OCR Arab/Thai (lihat
+         OcrTranslateHelper.backupTessdata/restoreTessdata). Disimpan di
+         external-files-dir app-scoped, folder ini murni untuk tujuan
+         backup itu sendiri.
+      2. ocr_translate_prefs — SharedPreferences kecil berisi riwayat
+         kode bahasa ML Kit yang pernah diunduh (dipakai
+         restoreLanguagesFromHistory untuk tahu bahasa apa yang perlu
+         diunduh ulang setelah clear-data/reinstall). Model ML Kit
+         sendiri TIDAK bisa dibackup (tersimpan di storage privat Google
+         Play Services), jadi yang dibackup di sini hanya daftarnya.
+-->
+<full-backup-content>
+    <include domain="external" path="Android/data/com.israfilx.circlesearch/files/tessdata_backup/" />
+    <include domain="sharedpref" path="ocr_translate_prefs.xml" />
+</full-backup-content>

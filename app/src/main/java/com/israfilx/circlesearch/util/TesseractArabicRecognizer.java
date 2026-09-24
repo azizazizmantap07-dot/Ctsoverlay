@@ -1,0 +1,168 @@
+package com.israfilx.circlesearch.util;
+
+import android.content.Context;
+import android.content.res.AssetManager;
+import android.graphics.Bitmap;
+import android.graphics.Rect;
+import android.util.Log;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
+
+import com.googlecode.tesseract.android.TessBaseAPI;
+import com.googlecode.tesseract.android.ResultIterator;
+
+/**
+ * OCR skrip Arabic via Tesseract (bukan ML Kit).
+ *
+ * KENAPA: ML Kit Text Recognition tidak menyediakan model on-device untuk
+ * skrip Arab sama sekali (lihat javadoc di
+ * {@link OcrTranslateHelper#recognizeInternal}). Kalau layar berisi teks
+ * Arab, kelima recognizer ML Kit yang ada (Latin/Chinese/Japanese/Korean/
+ * Devanagari) semuanya salah-baca — paling sering recognizer Latin yang
+ * "berhasil" secara teknis tapi menghasilkan sampah karakter Latin acak,
+ * yang kemudian membuat deteksi bahasa nyasar (contoh nyata dari log:
+ * "et", "fil" — bukan benar-benar bahasa Estonia/Filipino, itu tebakan
+ * ngawur dari OCR yang salah baca lengkungan huruf Arab).
+ *
+ * Kelas ini dipakai sebagai recognizer KE-6, berjalan paralel dengan 5
+ * recognizer ML Kit yang sudah ada di {@link OcrTranslateHelper}, lalu
+ * hasilnya divalidasi dengan cara yang sama (dominasi karakter skrip
+ * Arab) sebelum dianggap sebagai kandidat "OCR terbaik".
+ *
+ * Model bahasa (ara.traineddata, ~1.4 MB, dari tessdata_fast) di-BUNDLE
+ * langsung di assets/tessdata/ — tidak perlu diunduh terpisah seperti
+ * model Translate ML Kit. Saat pertama dipakai, file ini disalin sekali
+ * ke penyimpanan privat app (syarat Tesseract4Android: path harus bisa
+ * dibaca langsung dari filesystem, bukan dari dalam APK).
+ */
+public final class TesseractArabicRecognizer {
+
+    private static final String TAG = "CircleSearch/OcrTranslate";
+    private static final String LANG_CODE = "ara";
+    private static final String TESSDATA_ASSET_DIR = "tessdata";
+
+    private TesseractArabicRecognizer() {}
+
+    /**
+     * Pastikan ara.traineddata sudah ada di penyimpanan privat app.
+     * Aman dipanggil berkali-kali — hanya menyalin bila file belum ada
+     * atau ukurannya tidak cocok dengan yang ada di assets (mis. build
+     * baru mengganti versi model).
+     *
+     * HARUS dipanggil dari background thread (I/O file).
+     */
+    private static File ensureTessdataExtracted(Context context) throws IOException {
+        File tessRoot = new File(context.getFilesDir(), "tesseract");
+        File tessdataDir = new File(tessRoot, TESSDATA_ASSET_DIR);
+        if (!tessdataDir.exists() && !tessdataDir.mkdirs()) {
+            throw new IOException("Gagal membuat direktori tessdata: " + tessdataDir);
+        }
+
+        File destFile = new File(tessdataDir, LANG_CODE + ".traineddata");
+        AssetManager assets = context.getAssets();
+        String assetPath = TESSDATA_ASSET_DIR + "/" + LANG_CODE + ".traineddata";
+
+        long assetSize = -1;
+        try (InputStream probe = assets.open(assetPath)) {
+            assetSize = probe.available();
+        } catch (IOException e) {
+            Log.e(TAG, "Asset " + assetPath + " tidak ditemukan di APK", e);
+            throw e;
+        }
+
+        if (destFile.exists() && destFile.length() == assetSize) {
+            // Sudah ada dan ukurannya cocok, tidak perlu salin ulang.
+            return tessRoot;
+        }
+
+        Log.d(TAG, "Menyalin " + assetPath + " ke penyimpanan privat (" + assetSize + " bytes)");
+        try (InputStream in = assets.open(assetPath);
+             OutputStream out = new FileOutputStream(destFile)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            out.flush();
+        }
+        return tessRoot;
+    }
+
+    /**
+     * Jalankan OCR Arabic secara SINKRON. Harus dipanggil dari background
+     * thread (I/O ekstraksi asset + inferensi Tesseract, keduanya blocking).
+     *
+     * Mengembalikan list kosong bila gagal (mis. init Tesseract gagal) —
+     * TIDAK melempar exception ke pemanggil, konsisten dengan bagaimana
+     * OcrTranslateHelper memperlakukan kegagalan satu recognizer sebagai
+     * "list kosong" dan tetap melanjutkan proses dengan recognizer lain.
+     */
+    public static List<OcrBlock> recognize(Context context, Bitmap bitmap) {
+        List<OcrBlock> result = new ArrayList<>();
+        TessBaseAPI tessApi = null;
+        try {
+            File tessRoot = ensureTessdataExtracted(context);
+            tessApi = new TessBaseAPI();
+            boolean initOk = tessApi.init(tessRoot.getAbsolutePath(), LANG_CODE);
+            if (!initOk) {
+                Log.w(TAG, "Init Tesseract Arabic gagal (tessdata path=" + tessRoot.getAbsolutePath() + ")");
+                return result;
+            }
+
+            tessApi.setImage(bitmap);
+            // PSM_AUTO (3): biarkan Tesseract deteksi layout. Jangan pakai
+            // mode agresif yang cenderung "mengisi" halaman dengan huruf acak.
+            tessApi.setPageSegMode(3); // PSM_AUTO
+            tessApi.getUTF8Text();
+
+            ResultIterator iterator = tessApi.getResultIterator();
+            if (iterator != null) {
+                iterator.begin();
+                float confSum = 0f;
+                int confCount = 0;
+                do {
+                    String lineText = iterator.getUTF8Text(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
+                    Rect box = iterator.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
+                    float conf = iterator.confidence(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE);
+                    // Ambang 70: hasil hallucinasi pada gambar non-skrip biasanya
+                    // confidence-nya rendah-sedang. Teks asli yang jelas biasanya >75.
+                    if (lineText != null && !lineText.trim().isEmpty() && box != null && conf >= 70.0f) {
+                        result.add(new OcrBlock(lineText.trim(), box));
+                        confSum += conf;
+                        confCount++;
+                    }
+                } while (iterator.next(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE));
+                iterator.delete();
+
+                // Tolak SELURUH hasil bila rata-rata confidence rendah atau
+                // terlalu sedikit baris — indikasi kuat hallucinasi.
+                if (confCount > 0) {
+                    float avgConf = confSum / confCount;
+                    if (avgConf < 75.0f || confCount < 1) {
+                        Log.d(TAG, "OCR Arabic (Tesseract) dibuang: avgConf="
+                                + String.format("%.1f", avgConf) + " baris=" + confCount
+                                + " (kemungkinan hallucinasi)");
+                        result.clear();
+                    } else {
+                        Log.d(TAG, "OCR Arabic (Tesseract) avgConf="
+                                + String.format("%.1f", avgConf) + " baris=" + confCount);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "OCR Tesseract Arabic gagal: " + e.getMessage());
+            return new ArrayList<>();
+        } finally {
+            if (tessApi != null) {
+                try { tessApi.recycle(); } catch (Exception ignored) {}
+            }
+        }
+        return result;
+    }
+}

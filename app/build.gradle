@@ -1,0 +1,198 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.israfilx.circlesearch'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.israfilx.circlesearch"
+        minSdk 26
+        targetSdk 34
+        versionCode 28
+        versionName "1.9.7"
+
+        // Hanya arm64-v8a + armeabi-v7a (support 32-bit & 64-bit).
+        // Tidak menyertakan x86/x86_64 agar ukuran APK jauh lebih kecil.
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
+    }
+
+    // Split APK per-ABI: menghasilkan APK terpisah untuk armeabi-v7a dan
+    // arm64-v8a (native lib ML Kit + Tesseract tidak lagi digandakan
+    // untuk kedua arsitektur dalam satu APK), plus satu APK "universal"
+    // sebagai fallback yang tetap berisi kedua ABI seperti sebelumnya.
+    // abiFilters di atas tetap membatasi ABI yang di-pack; splits hanya
+    // memecahnya jadi beberapa file output.
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'armeabi-v7a', 'arm64-v8a'
+            universalApk true
+        }
+    }
+
+    // Dibaca dari properti -P yang diinjeksikan workflow build-release.yml
+    // (android.injected.signing.*). Jika tidak diisi (mis. build lokal biasa),
+    // signingConfig ini kosong dan AGP fallback ke unsigned/debug seperlunya.
+    signingConfigs {
+        release {
+            def storeFilePath = project.findProperty('android.injected.signing.store.file')
+            if (storeFilePath) {
+                storeFile file(storeFilePath)
+                storePassword project.findProperty('android.injected.signing.store.password')
+                keyAlias project.findProperty('android.injected.signing.key.alias')
+                keyPassword project.findProperty('android.injected.signing.key.password')
+            }
+        }
+        // Keystore debug TETAP, di-commit ke repo (keystore/debug_keystore.dat).
+        //
+        // MASALAH SEBELUM INI: assembleDebug tanpa signingConfig eksplisit
+        // memakai keystore debug AUTO-GENERATE Gradle/Android SDK di tiap
+        // environment (~/.android/debug.keystore). Karena tiap build APK
+        // debug lewat GitHub Actions jalan di runner/environment yang bisa
+        // berbeda-beda, keystore auto-generate ini TIDAK KONSISTEN antar
+        // build — signature APK debug berubah dari satu build ke build
+        // berikutnya. Akibatnya install APK baru di atas APK lama gagal
+        // dengan "INSTALL_FAILED_UPDATE_INCOMPATIBLE / tidak konsisten
+        // dengan tanda tangan APK yang diinstal", memaksa uninstall
+        // manual tiap kali — yang MENGHAPUS model bahasa ML Kit yang
+        // sudah diunduh (tersimpan di data privat app) dan bikin harus
+        // download ulang tiap sesi debug.
+        //
+        // Dengan keystore debug tetap di-commit dan dipakai eksplisit di
+        // sini, signature APK debug SELALU SAMA di semua build & semua
+        // runner — install baru di atas versi lama selalu dianggap
+        // "update" oleh Android (data & model ML Kit tetap ada), selama
+        // versionCode tidak diturunkan.
+        debug {
+            storeFile file('../keystore/debug_keystore.dat')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        release {
+            // Optimasi ukuran: R8 minify + resource shrinking
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // Native lib tidak dikompres agar ELF alignment 16 KB bisa dihormati
+    // oleh loader (persyaratan perangkat Android 15+ dengan page size 16 KB).
+    // Peringatan popup "tidak kompatibel 16 KB" pada APK debug tetap bisa
+    // muncul karena library ML Kit Google belum semua 16KB-aligned —
+    // itu bug di sisi Google, bukan app. Build release + "Jangan Tampilkan
+    // Lagi" menekan dialog; OCR/translate tetap berfungsi.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+        resources {
+            excludes += [
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE',
+                'META-INF/LICENSE.txt',
+                'META-INF/NOTICE',
+                'META-INF/NOTICE.txt',
+                'META-INF/*.kotlin_module'
+            ]
+        }
+    }
+}
+
+// versionCode berbeda per-ABI (offset kecil per arsitektur). Tidak wajib
+// untuk sideload manual biasa, tapi jadi jaring pengaman standar kalau
+// suatu saat APK split didistribusikan lewat mekanisme yang membanding-
+// kan versionCode antar file (mis. app store pihak ketiga / F-Droid-like
+// updater). Tidak memengaruhi APK universal (tetap pakai versionCode asli).
+def abiVersionCodes = ['armeabi-v7a': 1, 'arm64-v8a': 2]
+android.applicationVariants.all { variant ->
+    variant.outputs.each { output ->
+        def abiName = output.getFilter(com.android.build.OutputFile.ABI)
+        if (abiName != null && abiVersionCodes.containsKey(abiName)) {
+            output.versionCodeOverride = variant.versionCode * 10 + abiVersionCodes.get(abiName)
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.annotation:annotation:1.7.1'
+    implementation 'androidx.core:core:1.12.0'
+
+    // Material Components: komponen & tema Material 3 untuk menu utama.
+    implementation 'com.google.android.material:material:1.12.0'
+
+    // ML Kit translate/language-id menarik kotlin-stdlib-jdk7/jdk8 versi
+    // lama (1.6.0) sebagai dependency transitif, yang isinya sudah
+    // digabung ke dalam kotlin-stdlib itu sendiri sejak Kotlin 1.8 —
+    // menyebabkan "Duplicate class" saat dexing. Exclude keduanya di
+    // setiap modul ML Kit yang menariknya.
+    //
+    // OCR multi-skrip: Latin + Chinese + Japanese + Korean + Devanagari
+    // agar teks non-Latin (Cina, Jepang, Korea, Hindi, dll) bisa diekstrak
+    // dan diterjemahkan ke Indonesia.
+    implementation('com.google.mlkit:text-recognition:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:text-recognition-chinese:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:text-recognition-japanese:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:text-recognition-korean:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:text-recognition-devanagari:16.0.1') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:language-id:17.0.6') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation('com.google.mlkit:translate:17.0.3') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+
+    // OCR Arabic: ML Kit Text Recognition TIDAK punya model on-device untuk
+    // skrip Arab sama sekali (limitasi Google, bukan bug kita — lihat
+    // javadoc OcrTranslateHelper#recognizeInternal). Tesseract4Android
+    // dipakai HANYA sebagai recognizer ke-6 khusus Arab, berjalan paralel
+    // dengan 5 recognizer ML Kit yang sudah ada. Varian "standard"
+    // (single-threaded) dipilih karena kita sudah menjalankan banyak
+    // recognizer paralel sekaligus per screenshot; varian OpenMP tidak
+    // memberi banyak untung di sini dan menambah kompleksitas native lib.
+    implementation 'cz.adaptech.tesseract4android:tesseract4android:4.8.0'
+}
+
+// Jaring pengaman tambahan: paksa semua konfigurasi memakai satu versi
+// kotlin-stdlib saja (yang terbaru), berlaku juga bila dependency lain
+// di masa depan menarik versi kotlin-stdlib-jdk7/jdk8 yang berbeda.
+configurations.all {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+    }
+}
